@@ -174,6 +174,9 @@ class RingBuffer:
 
     def close(self):
         """Release underlying mmap buffer."""
+        if hasattr(self, "_mv") and self._mv is not None:
+            self._mv.release()
+            self._mv = None
         if hasattr(self, "_mmap_buf") and self._mmap_buf is not None:
             self._mmap_buf.close()
             self._mmap_buf = None

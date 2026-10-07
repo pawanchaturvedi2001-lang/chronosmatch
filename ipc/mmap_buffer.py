@@ -44,14 +44,18 @@ class MmapBuffer:
         else:
             # Anonymous memory map
             self.mm = mmap.mmap(-1, size)
+        self._mv = memoryview(self.mm)
 
     @property
     def buffer(self) -> memoryview:
         """Returns a zero-copy memoryview of the mapped memory."""
-        return memoryview(self.mm)
+        return self._mv
 
     def close(self):
         """Release and close mmap resources."""
+        if hasattr(self, "_mv") and self._mv is not None:
+            self._mv.release()
+            self._mv = None
         if hasattr(self, "mm") and self.mm is not None:
             self.mm.close()
             self.mm = None

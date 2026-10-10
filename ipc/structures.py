@@ -115,3 +115,4 @@ def unpack_order(data: bytes) -> Order:
         side=side,
         timestamp_ns=timestamp_ns,
     )
+

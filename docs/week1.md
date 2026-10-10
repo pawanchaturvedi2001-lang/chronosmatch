@@ -109,3 +109,4 @@ python simulator/market_simulator.py --orders 100000 --rate 0 --buffer-capacity 
 ```bash
 python benchmarks/simulator_benchmark.py --orders 100000
 ```
+

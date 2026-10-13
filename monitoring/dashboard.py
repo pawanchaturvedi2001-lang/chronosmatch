@@ -158,7 +158,7 @@ class OrderBookDashboard:
 
         stdscr.addstr(21, 2, "PERFORMANCE METRICS", color_cyan | curses.A_BOLD)
         stat1 = f"Orders Processed: {self.lob.total_orders_processed:,} | Trades: {self.lob.total_trades_executed:,} | Filled Volume: {self.lob.total_volume_executed:,}"
-        stat2 = f"Throughput: {self._current_throughput:,.1f} orders/sec | Latency (avg): {avg_lat_us:.2f} µs | Latency (last): {last_lat_us:.2f} µs"
+        stat2 = f"Throughput: {self._current_throughput:,.1f} orders/sec | Latency (avg): {avg_lat_us:.2f} us | Latency (last): {last_lat_us:.2f} us"
 
         stdscr.addstr(22, 2, stat1[:max_x - 3])
         stdscr.addstr(23, 2, stat2[:max_x - 3], color_green if avg_lat_us < 50.0 else color_yellow)

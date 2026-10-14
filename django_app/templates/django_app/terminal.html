@@ -1,0 +1,310 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }} — Zero-Copy HFT Engine</title>
+  <link rel="stylesheet" href="{% static 'css/terminal.css' %}">
+  <!-- Lightweight standard Chart.js from CDN for real-time charting -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <!-- Top Navigation & Brand Header -->
+  <header class="header-bar">
+    <div class="brand-section">
+      <div class="brand-logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #38bdf8;">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        CHRONOS<span>MATCH</span>
+      </div>
+      <span class="mode-badge {% if is_native_cython %}native{% else %}fallback{% endif %}">
+        {{ engine_mode }}
+      </span>
+    </div>
+
+    <div class="header-status-strip">
+      <div class="status-pill">
+        <div id="engine-dot" class="pulse-dot active"></div>
+        <span>ENGINE: <strong id="engine-status-text">INITIALIZING</strong></span>
+      </div>
+      <div class="status-pill">
+        <div id="sim-dot" class="pulse-dot"></div>
+        <span>SIMULATOR: <strong id="sim-status-text">IDLE</strong></span>
+      </div>
+      <div class="status-pill">
+        <span>IPC RING: <strong id="ipc-status-text">ONLINE (mmap)</strong></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Educational & Safety Disclaimer Banner -->
+  <div class="disclaimer-banner">
+    <div>
+      <strong>SIMULATED ENVIRONMENT:</strong> ChronosMatch is an educational high-frequency trading engine. Never submit real financial transactions.
+    </div>
+    <div id="connection-status" style="color: var(--bid-green); font-family: var(--font-mono);">
+      SYSTEM CONNECTED (Polling 500ms)
+    </div>
+  </div>
+
+  <!-- Real-Time Top Metrics Ticker -->
+  <section class="metrics-ticker">
+    <div class="ticker-item">
+      <span class="ticker-label">Market Price</span>
+      <span class="ticker-value highlight" id="ticker-market-price">--.--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Best Bid</span>
+      <span class="ticker-value bid" id="ticker-best-bid">--.--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Best Ask</span>
+      <span class="ticker-value ask" id="ticker-best-ask">--.--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Spread</span>
+      <span class="ticker-value spread" id="ticker-spread">--.--</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Throughput</span>
+      <span class="ticker-value" id="ticker-throughput">0.0 ops/s</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Total Orders</span>
+      <span class="ticker-value" id="ticker-orders-count">0</span>
+    </div>
+    <div class="ticker-item">
+      <span class="ticker-label">Executed Trades</span>
+      <span class="ticker-value" id="ticker-trades-count">0</span>
+    </div>
+  </section>
+
+  <!-- Main Trading Terminal Grid -->
+  <main class="terminal-grid">
+
+    <!-- Column 1: Order Book (Level 2 Market Depth) -->
+    <div class="terminal-card">
+      <div class="card-header">
+        <span>Order Book (L2 Depth)</span>
+        <span class="badge" id="book-depth-badge">5 Levels</span>
+      </div>
+      <div class="card-body" style="padding: 0;">
+        <table class="order-book-table">
+          <thead>
+            <tr>
+              <th style="width: 35%;">Price ($)</th>
+              <th style="width: 35%;">Size (Qty)</th>
+              <th style="width: 30%;">Total</th>
+            </tr>
+          </thead>
+          <!-- Asks (Sells) Table Body: Ascending from top to bottom -->
+          <tbody id="order-book-asks">
+            <tr><td colspan="3" style="text-align: center; color: var(--text-dim); padding: 20px;">Awaiting Asks...</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Spread Divider -->
+        <div class="book-divider">
+          <span>SPREAD: <strong id="book-spread-text">--</strong></span>
+          <span>LAST: <strong id="book-last-text">--</strong></span>
+        </div>
+
+        <table class="order-book-table">
+          <!-- Bids (Buys) Table Body: Descending from top to bottom -->
+          <tbody id="order-book-bids">
+            <tr><td colspan="3" style="text-align: center; color: var(--text-dim); padding: 20px;">Awaiting Bids...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Column 2: Performance Charts & Recent Executed Trades -->
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+      
+      <!-- Real-Time Price & Throughput Charts -->
+      <div class="terminal-card">
+        <div class="card-header">
+          <span>Market Telemetry (Live Price & Ingestion Throughput)</span>
+          <span class="badge" style="color: var(--accent-cyan);">60s Window</span>
+        </div>
+        <div class="card-body" style="padding: 8px;">
+          <div class="chart-container">
+            <canvas id="marketChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Latency Percentiles Card -->
+      <div class="terminal-card">
+        <div class="card-header">
+          <span>Execution Latency Profile (Microseconds µs)</span>
+          <span class="badge" id="latency-mode-badge">Hot-Path C/Cython</span>
+        </div>
+        <div class="card-body" style="padding: 10px;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <div>
+              <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-weight: 600;">MATCHING ENGINE LATENCY</div>
+              <div class="latency-grid">
+                <div class="latency-box">
+                  <div class="latency-box-title">Mean</div>
+                  <div class="latency-box-val" id="lat-engine-mean">-- µs</div>
+                </div>
+                <div class="latency-box">
+                  <div class="latency-box-title">P95</div>
+                  <div class="latency-box-val" id="lat-engine-p95">-- µs</div>
+                </div>
+                <div class="latency-box">
+                  <div class="latency-box-title">P99</div>
+                  <div class="latency-box-val" id="lat-engine-p99">-- µs</div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-weight: 600;">PIPELINE END-TO-END LATENCY</div>
+              <div class="latency-grid">
+                <div class="latency-box">
+                  <div class="latency-box-title">Mean</div>
+                  <div class="latency-box-val" id="lat-e2e-mean">-- µs</div>
+                </div>
+                <div class="latency-box">
+                  <div class="latency-box-title">P95</div>
+                  <div class="latency-box-val" id="lat-e2e-p95">-- µs</div>
+                </div>
+                <div class="latency-box">
+                  <div class="latency-box-title">P99</div>
+                  <div class="latency-box-val" id="lat-e2e-p99">-- µs</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Executed Trades Tape -->
+      <div class="terminal-card">
+        <div class="card-header">
+          <span>Recent Executed Trades</span>
+          <span class="badge" id="trades-count-badge">Tape</span>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <div style="display: grid; grid-template-columns: 70px 65px 75px 1fr; padding: 6px 8px; font-size: 10px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border-color); text-transform: uppercase;">
+            <span>Time</span>
+            <span>Side</span>
+            <span>Price ($)</span>
+            <span>Qty / IDs</span>
+          </div>
+          <div class="trades-tape-container" id="trades-tape">
+            <div style="text-align: center; color: var(--text-dim); padding: 25px;">No trades executed yet.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Column 3: Order Entry & Simulator Controls -->
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+
+      <!-- Simulated Order Entry Panel -->
+      <div class="terminal-card">
+        <div class="card-header">
+          <span>Submit Simulated Order</span>
+          <span class="badge" style="color: var(--bid-green);">Manual Entry</span>
+        </div>
+        <div class="card-body">
+          <form id="order-form" class="order-form" onsubmit="event.preventDefault(); submitOrder();">
+            <div class="side-selector">
+              <button type="button" class="btn-side buy selected" id="btn-side-buy" onclick="selectSide('BUY')">BUY</button>
+              <button type="button" class="btn-side sell" id="btn-side-sell" onclick="selectSide('SELL')">SELL</button>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="order-price">Limit Price ($)</label>
+              <input type="number" id="order-price" class="form-input" step="0.01" min="0.01" placeholder="e.g. 100.50" required>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="order-quantity">Quantity (Shares)</label>
+              <input type="number" id="order-quantity" class="form-input" step="1" min="1" placeholder="e.g. 50" required>
+            </div>
+
+            <div class="form-group">
+              <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
+                <span>Estimated Value:</span>
+                <span id="order-est-total" style="font-family: var(--font-mono); color: #fff;">$0.00</span>
+              </div>
+            </div>
+
+            <button type="submit" id="btn-order-submit" class="btn-submit buy">SUBMIT BUY ORDER</button>
+
+            <!-- Order submission response log -->
+            <div id="order-status-log" class="action-log">Ready for simulated order submission.</div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Simulator Lifecycle Controls -->
+      <div class="terminal-card">
+        <div class="card-header">
+          <span>Market Simulator Controls</span>
+          <span class="badge" id="sim-speed-badge">Firehose</span>
+        </div>
+        <div class="card-body">
+          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">
+            Blast realistic BUY/SELL mock orders through the shared-memory RingBuffer into the Cython matching engine.
+          </div>
+
+          <div class="form-group" style="margin-bottom: 8px;">
+            <label class="form-label" for="sim-orders-input">Batch Orders Count</label>
+            <input type="number" id="sim-orders-input" class="form-input" value="5000" min="100" max="500000" step="500">
+          </div>
+
+          <div class="form-group" style="margin-bottom: 8px;">
+            <label class="form-label" for="sim-rate-input">Target Rate (ops/sec, 0 = max)</label>
+            <input type="number" id="sim-rate-input" class="form-input" value="25000" min="0" max="200000" step="5000">
+          </div>
+
+          <div class="sim-controls-grid">
+            <button type="button" class="btn-sim start" id="btn-sim-start" onclick="startSimulator()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              START
+            </button>
+            <button type="button" class="btn-sim stop" id="btn-sim-stop" onclick="stopSimulator()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"></rect></svg>
+              STOP
+            </button>
+          </div>
+
+          <div style="margin-top: 8px;">
+            <button type="button" class="btn-sim reset" style="width: 100%;" onclick="resetBook()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+              RESET ORDER BOOK
+            </button>
+          </div>
+
+          <div id="sim-status-log" class="action-log" style="margin-top: 10px;">Simulator idle. Ready to start.</div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <div>
+      ChronosMatch High-Frequency Trading Terminal &bull; Zero-Copy Shared-Memory Architecture &bull; Week 2 / Web Milestone
+    </div>
+    <div>
+      <a href="/api/health/" target="_blank">Engine Health API</a> &bull;
+      <a href="/api/market-data/" target="_blank">Market Data Feed</a>
+    </div>
+  </footer>
+
+  <script src="{% static 'js/terminal.js' %}"></script>
+</body>
+</html>

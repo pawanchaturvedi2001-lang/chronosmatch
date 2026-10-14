@@ -4,6 +4,7 @@ __pycache__/
 *.so
 *.pyd
 *.bin
+*.mmap
 .coverage
 htmlcov/
 .pytest_cache/
@@ -11,4 +12,5 @@ build/
 dist/
 *.egg-info/
 *.c
-*.html
+core/cython_engine/*.html
+db.sqlite3

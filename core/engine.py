@@ -16,7 +16,8 @@ import asyncio
 import time
 import argparse
 import sys
-from typing import Optional, List
+from collections import deque
+from typing import Optional, List, Dict, Any
 
 from ipc.structures import Order, unpack_order, ORDER_SIZE
 from ipc.ring_buffer import RingBuffer
@@ -43,10 +44,52 @@ class ChronosEngine:
         self.batch_size = max(1, batch_size)
         self.is_running = False
 
+        # Status tracking
+        self.simulator_status = "READY"
+        self.engine_status = "READY"
+
         # Consumer statistics
         self.orders_consumed = 0
         self.trades_generated = 0
         self.consumer_elapsed_sec = 0.0
+
+        # Latency samples (sliding window in microseconds)
+        self.match_latencies: deque = deque(maxlen=20000)
+        self.e2e_latencies: deque = deque(maxlen=20000)
+        self._last_throughput_calc = time.perf_counter()
+        self._last_orders_count = 0
+        self.current_throughput = 0.0
+
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """
+        Calculates real-time engine and end-to-end performance percentiles.
+        """
+        def _calc_percentiles(samples: deque):
+            if not samples:
+                return 0.0, 0.0, 0.0
+            s = sorted(samples)
+            n = len(s)
+            mean_v = sum(s) / n
+            p95_v = s[min(int(n * 0.95), n - 1)]
+            p99_v = s[min(int(n * 0.99), n - 1)]
+            return mean_v, p95_v, p99_v
+
+        m_mean, m_p95, m_p99 = _calc_percentiles(self.match_latencies)
+        e_mean, e_p95, e_p99 = _calc_percentiles(self.e2e_latencies)
+
+        return {
+            "match_latency_mean_us": m_mean,
+            "match_latency_p95_us": m_p95,
+            "match_latency_p99_us": m_p99,
+            "e2e_latency_mean_us": e_mean,
+            "e2e_latency_p95_us": e_p95,
+            "e2e_latency_p99_us": e_p99,
+            "orders_consumed": self.orders_consumed,
+            "trades_generated": self.trades_generated,
+            "throughput_ops": self.current_throughput,
+            "simulator_status": self.simulator_status,
+            "engine_status": self.engine_status,
+        }
 
     async def run_consumer(self, stop_event: asyncio.Event) -> int:
         """
@@ -59,12 +102,16 @@ class ChronosEngine:
             Total count of orders matched.
         """
         self.is_running = True
+        self.engine_status = "RUNNING"
         rb_read = self.ring_buffer.read
         process_order = self.lob.process_order
         unpack = unpack_order
         batch_size = self.batch_size
+        time_ns = time.time_ns
 
         t0 = time.perf_counter()
+        self._last_throughput_calc = t0
+        self._last_orders_count = self.orders_consumed
 
         while not stop_event.is_set():
             batch_count = 0
@@ -73,26 +120,59 @@ class ChronosEngine:
                 if data is None:
                     break
                 order = unpack(data)
+
+                # End-to-end latency: from order creation to ingestion
+                now_ns = time_ns()
+                if order.timestamp_ns > 0:
+                    e2e_us = (now_ns - order.timestamp_ns) / 1000.0
+                    if e2e_us >= 0:
+                        self.e2e_latencies.append(e2e_us)
+
                 trades = process_order(order)
+                match_us = self.lob.last_match_latency_ns / 1000.0
+                self.match_latencies.append(match_us)
+
                 self.orders_consumed += 1
                 self.trades_generated += len(trades)
                 batch_count += 1
+
+            # Update rolling throughput
+            now = time.perf_counter()
+            dt = now - self._last_throughput_calc
+            if dt >= 0.2:
+                delta_orders = self.orders_consumed - self._last_orders_count
+                self.current_throughput = delta_orders / dt if dt > 0 else 0.0
+                self._last_orders_count = self.orders_consumed
+                self._last_throughput_calc = now
 
             if batch_count == 0:
                 # Yield to event loop to allow simulator to produce
                 await asyncio.sleep(0)
 
         # Final drain of remaining orders in the ring buffer
+        self.engine_status = "DRAINING"
         while True:
             data = rb_read()
             if data is None:
                 break
             order = unpack(data)
+
+            now_ns = time_ns()
+            if order.timestamp_ns > 0:
+                e2e_us = (now_ns - order.timestamp_ns) / 1000.0
+                if e2e_us >= 0:
+                    self.e2e_latencies.append(e2e_us)
+
             trades = process_order(order)
+            match_us = self.lob.last_match_latency_ns / 1000.0
+            self.match_latencies.append(match_us)
+
             self.orders_consumed += 1
             self.trades_generated += len(trades)
 
         self.consumer_elapsed_sec = max(1e-9, time.perf_counter() - t0)
+        self.current_throughput = self.orders_consumed / self.consumer_elapsed_sec
+        self.engine_status = "COMPLETED"
         self.is_running = False
         return self.orders_consumed
 
@@ -102,6 +182,7 @@ class ChronosEngine:
         target_rate: Optional[int] = 100_000,
         with_dashboard: bool = False,
         seed: Optional[int] = 42,
+        auto_exit: bool = True,
     ) -> dict:
         """
         Launch the end-to-end simulation, ingestion, matching, and monitoring pipeline.
@@ -115,10 +196,11 @@ class ChronosEngine:
         dashboard_task = None
         dashboard = None
         if with_dashboard and HAVE_CURSES:
-            dashboard = OrderBookDashboard(self.lob, refresh_hz=10.0)
+            dashboard = OrderBookDashboard(self.lob, engine=self, refresh_hz=10.0, auto_exit=auto_exit)
             dashboard_task = asyncio.create_task(dashboard.render_loop_async(stop_event))
 
         # 3. Run Market Simulator producer
+        self.simulator_status = "RUNNING"
         sim_stats = await run_simulator(
             ring_buffer=self.ring_buffer,
             total_orders=total_orders,
@@ -127,17 +209,17 @@ class ChronosEngine:
             backpressure_mode="wait",
             seed=seed,
         )
+        self.simulator_status = "COMPLETED"
 
         # 4. Signal consumer and dashboard to finish
         stop_event.set()
         await consumer_task
 
         if dashboard_task:
-            if dashboard:
-                dashboard.is_running = False
             await dashboard_task
 
         consumer_throughput = self.orders_consumed / self.consumer_elapsed_sec
+        perf_stats = self.get_performance_stats()
 
         return {
             "orders_generated": sim_stats.orders_generated,
@@ -151,6 +233,12 @@ class ChronosEngine:
             "dropped": sim_stats.orders_dropped,
             "retries": sim_stats.orders_retried,
             "mode": "CYTHON NATIVE" if IS_NATIVE_CYTHON else "PURE PYTHON FALLBACK",
+            "match_latency_mean_us": perf_stats["match_latency_mean_us"],
+            "match_latency_p95_us": perf_stats["match_latency_p95_us"],
+            "match_latency_p99_us": perf_stats["match_latency_p99_us"],
+            "e2e_latency_mean_us": perf_stats["e2e_latency_mean_us"],
+            "e2e_latency_p95_us": perf_stats["e2e_latency_p95_us"],
+            "e2e_latency_p99_us": perf_stats["e2e_latency_p99_us"],
         }
 
 
@@ -217,6 +305,12 @@ async def main():
     print(f"Consumer Elapsed:     {results['consumer_elapsed']:.4f} sec")
     print(f"Producer Throughput:  {results['producer_throughput']:,.1f} orders/sec")
     print(f"Consumer Throughput:  {results['consumer_throughput']:,.1f} orders/sec")
+    print(f"Engine Latency (Mean): {results['match_latency_mean_us']:.2f} us")
+    print(f"Engine Latency (P95):  {results['match_latency_p95_us']:.2f} us")
+    print(f"Engine Latency (P99):  {results['match_latency_p99_us']:.2f} us")
+    print(f"E2E Latency (Mean):    {results['e2e_latency_mean_us']:.2f} us")
+    print(f"E2E Latency (P95):     {results['e2e_latency_p95_us']:.2f} us")
+    print(f"E2E Latency (P99):     {results['e2e_latency_p99_us']:.2f} us")
     print(f"Dropped Orders:       {results['dropped']}")
     print(f"Backpressure Retries: {results['retries']}")
     print("=" * 60)

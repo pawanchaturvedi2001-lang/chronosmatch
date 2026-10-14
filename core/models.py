@@ -69,3 +69,4 @@ class PriceLevel:
 
     def __repr__(self) -> str:
         return f"Level({self.price:.2f} x {self.total_quantity} ({self.order_count} orders))"
+

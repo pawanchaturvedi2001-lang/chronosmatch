@@ -382,3 +382,4 @@ if CYTHON_AVAILABLE and CythonLimitOrderBook is not None:
 else:
     LimitOrderBook = PyLimitOrderBook
     IS_NATIVE_CYTHON = False
+

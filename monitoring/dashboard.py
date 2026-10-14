@@ -324,7 +324,16 @@ class OrderBookDashboard:
                 self._draw_frame(stdscr)
                 time.sleep(self.refresh_interval)
 
-        await asyncio.to_thread(curses.wrapper, _curses_runner)
+        try:
+            await asyncio.to_thread(curses.wrapper, _curses_runner)
+        except curses.error as e:
+            if "Redirection is not supported" in str(e):
+                # When run in headless/piped environments (e.g. CI or subprocess redirection),
+                # wait until stop_event is set
+                while not (stop_event is not None and stop_event.is_set()):
+                    await asyncio.sleep(self.refresh_interval)
+            else:
+                raise
 
 
 def launch_dashboard(
@@ -336,4 +345,10 @@ def launch_dashboard(
     if not HAVE_CURSES:
         raise RuntimeError("Python curses module is required to run the terminal dashboard.")
     dash = OrderBookDashboard(lob, engine=engine, refresh_hz=refresh_hz, auto_exit=False)
-    curses.wrapper(dash.run_curses)
+    try:
+        curses.wrapper(dash.run_curses)
+    except curses.error as e:
+        if "Redirection is not supported" in str(e):
+            print("[Notice] Curses interactive UI requires a real console TTY. Redirection is not supported.")
+        else:
+            raise

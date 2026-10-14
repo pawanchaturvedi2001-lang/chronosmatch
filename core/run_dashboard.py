@@ -76,6 +76,10 @@ async def run():
         sys.exit(1)
 
     target_rate = args.rate if args.rate > 0 else None
+    is_interactive = sys.stdout.isatty()
+    if not is_interactive:
+        print("[Notice] Non-interactive or redirected terminal detected. Executing pipeline in console mode.")
+        print("[Notice] For full interactive curses dashboard, execute directly in an interactive terminal window.")
 
     # Setup IPC ring buffer and matching engine
     ring_buffer = RingBuffer(capacity=args.buffer_capacity, slot_size=ORDER_SIZE)
@@ -86,7 +90,7 @@ async def run():
         results = await engine.start_pipeline(
             total_orders=args.orders,
             target_rate=target_rate,
-            with_dashboard=True,
+            with_dashboard=is_interactive,
             seed=args.seed,
             auto_exit=args.auto_exit,
         )

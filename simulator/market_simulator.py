@@ -1,4 +1,4 @@
-﻿"""Simple asynchronous market-order generator for ChronosMatch."""
+"""Simple asynchronous market-order generator for ChronosMatch."""
 
 import argparse
 import asyncio
@@ -71,7 +71,7 @@ async def demo(path: str, capacity: int, count: int) -> None:
         simulator = MarketSimulator(buffer, seed=42)
         written = await simulator.produce(count)
         print(f"Generated and wrote {written} orders to {path}")
-        print(f"Orders remaining in buffer: {buffer.size()}")
+        print(f"Orders remaining in buffer: {buffer.available_read}")
     finally:
         buffer.close()
 

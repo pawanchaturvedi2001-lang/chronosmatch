@@ -1,4 +1,4 @@
-"""
+﻿"""
 ChronosMatch Zero-Copy High-Frequency Trading Engine
 IPC Ring Buffer module (Member 2)
 
@@ -173,7 +173,10 @@ class RingBuffer:
         HEADER_STRUCT.pack_into(self._mv, 0, 0, 0, self.capacity, self.slot_size)
 
     def close(self):
-        """Release underlying mmap buffer."""
-        if hasattr(self, "_mmap_buf") and self._mmap_buf is not None:
+        """Release the memory view and underlying mmap buffer."""
+        if getattr(self, "_mv", None) is not None:
+            self._mv.release()
+            self._mv = None
+        if getattr(self, "_mmap_buf", None) is not None:
             self._mmap_buf.close()
             self._mmap_buf = None

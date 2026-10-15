@@ -1,40 +1,22 @@
-﻿"""
-ChronosMatch Zero-Copy High-Frequency Trading Engine
-IPC Ring Buffer module (Member 2)
-
-High-performance lock-free Single-Producer Single-Consumer (SPSC) ring buffer
-stored directly in memory-mapped shared memory.
-"""
+﻿"""Memory-mapped FIFO ring buffer for ChronosMatch."""
 
 import struct
 from typing import Optional
-from ipc.structures import ORDER_SIZE
+
 from ipc.mmap_buffer import MmapBuffer
+from ipc.structures import ORDER_SIZE
+
+HEADER_FORMAT = "<QQII"
+HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
+HEADER_SIZE = HEADER_STRUCT.size
 
 
 class BufferFullError(Exception):
-    """Raised or used when the ring buffer has reached capacity."""
-    pass
-
-
-# Ring buffer header format:
-# '<QQII' (24 bytes):
-#   write_idx: uint64 (8 bytes)
-#   read_idx:  uint64 (8 bytes)
-#   capacity:  uint32 (4 bytes)
-#   slot_size: uint32 (4 bytes)
-HEADER_FORMAT = "<QQII"
-HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
-HEADER_SIZE = HEADER_STRUCT.size  # 24 bytes
+    """Raised when the ring buffer is full."""
 
 
 class RingBuffer:
-    """
-    Fixed-slot, zero-copy circular ring buffer implemented over shared memory.
-
-    Layout in shared memory:
-    [ HEADER (24 bytes) ] [ SLOT 0 (slot_size) ] [ SLOT 1 ] ... [ SLOT capacity-1 ]
-    """
+    """Fixed-capacity FIFO ring buffer using memory-mapped storage."""
 
     def __init__(
         self,
@@ -44,139 +26,157 @@ class RingBuffer:
         filepath: Optional[str] = None,
         create: bool = True,
     ):
-        """
-        Initialize the RingBuffer.
+        if capacity <= 0:
+            raise ValueError("Capacity must be positive")
+        if slot_size <= 0:
+            raise ValueError("Slot size must be positive")
 
-        Args:
-            capacity: Total number of slots (orders) the ring buffer can store.
-            slot_size: Size in bytes of each slot (defaults to ORDER_SIZE = 29 bytes).
-            mmap_buffer: Optional existing MmapBuffer instance.
-            filepath: Optional file path if creating a new file-backed shared buffer.
-            create: Whether this instance initializes header state.
-        """
         self.capacity = capacity
         self.slot_size = slot_size
-        total_size = HEADER_SIZE + (capacity * slot_size)
+        self._owns_buffer = mmap_buffer is None
+        self._mmap_buf = None
+        self._mv = None
 
-        if mmap_buffer is not None:
-            self._mmap_buf = mmap_buffer
-        else:
-            self._mmap_buf = MmapBuffer(filepath=filepath, size=total_size, create=create)
+        total_size = HEADER_SIZE + capacity * slot_size
 
-        self._mv = self._mmap_buf.buffer
+        try:
+            if mmap_buffer is not None:
+                self._mmap_buf = mmap_buffer
+            else:
+                self._mmap_buf = MmapBuffer(
+                    filepath=filepath,
+                    size=total_size,
+                    create=create,
+                )
 
-        if create:
-            # Initialize header: write_idx=0, read_idx=0, capacity, slot_size
-            HEADER_STRUCT.pack_into(self._mv, 0, 0, 0, self.capacity, self.slot_size)
-        else:
-            # Read header parameters
-            w, r, cap, sz = HEADER_STRUCT.unpack_from(self._mv, 0)
-            self.capacity = cap
-            self.slot_size = sz
+            self._mv = self._mmap_buf.buffer
+
+            if create:
+                HEADER_STRUCT.pack_into(
+                    self._mv, 0, 0, 0, capacity, slot_size
+                )
+            else:
+                _, _, saved_capacity, saved_slot_size = (
+                    HEADER_STRUCT.unpack_from(self._mv, 0)
+                )
+
+                if saved_capacity <= 0 or saved_slot_size <= 0:
+                    raise ValueError("Invalid ring buffer header")
+
+                if saved_capacity != capacity:
+                    raise ValueError("Saved capacity does not match")
+
+                if saved_slot_size != slot_size:
+                    raise ValueError("Saved slot size does not match")
+
+            required_size = HEADER_SIZE + capacity * slot_size
+            if len(self._mv) < required_size:
+                raise ValueError("Mapped buffer is too small")
+
+        except Exception:
+            self.close()
+            raise
+
+    def _header(self):
+        return HEADER_STRUCT.unpack_from(self._mv, 0)
 
     @property
     def write_idx(self) -> int:
-        """Current monotonic write index."""
-        return HEADER_STRUCT.unpack_from(self._mv, 0)[0]
-
-    @write_idx.setter
-    def write_idx(self, value: int):
-        HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            value,
-            self.read_idx,
-            self.capacity,
-            self.slot_size,
-        )
+        return self._header()[0]
 
     @property
     def read_idx(self) -> int:
-        """Current monotonic read index."""
-        return HEADER_STRUCT.unpack_from(self._mv, 0)[1]
+        return self._header()[1]
 
-    @read_idx.setter
-    def read_idx(self, value: int):
-        HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            self.write_idx,
-            value,
-            self.capacity,
-            self.slot_size,
-        )
-
+    @property
     def size(self) -> int:
-        """Returns the number of unconsumed items currently in the buffer."""
-        w, r, _, _ = HEADER_STRUCT.unpack_from(self._mv, 0)
-        return w - r
+        write_idx, read_idx, _, _ = self._header()
+        return write_idx - read_idx
 
-    def is_full(self) -> bool:
-        """Returns True if the buffer cannot accept any more items."""
-        return self.size() >= self.capacity
+    @property
+    def available_write(self) -> int:
+        return self.capacity - self.size
+
+    @property
+    def available_read(self) -> int:
+        return self.size
 
     def is_empty(self) -> bool:
-        """Returns True if there are no items waiting to be read."""
-        return self.size() == 0
+        return self.size == 0
 
-    def available_write(self) -> int:
-        """Number of free slots available for writing."""
-        return max(0, self.capacity - self.size())
-
-    def available_read(self) -> int:
-        """Number of items available for reading."""
-        return self.size()
+    def is_full(self) -> bool:
+        return self.size >= self.capacity
 
     def write(self, data: bytes) -> bool:
-        """
-        Write binary data into the next free slot in the ring buffer.
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
 
-        Args:
-            data: Binary payload of length <= slot_size.
+        if len(data) != self.slot_size:
+            raise ValueError(
+                f"Record must be exactly {self.slot_size} bytes"
+            )
 
-        Returns:
-            True if written successfully, False if buffer is full.
-        """
-        w, r, cap, slot_sz = HEADER_STRUCT.unpack_from(self._mv, 0)
-        if w - r >= cap:
-            return False  # Buffer full
+        write_idx, read_idx, capacity, slot_size = self._header()
 
-        slot_offset = HEADER_SIZE + ((w % cap) * slot_sz)
-        data_len = len(data)
-        if data_len > slot_sz:
-            raise ValueError(f"Data size {data_len} exceeds slot size {slot_sz}")
+        if write_idx - read_idx >= capacity:
+            return False
 
-        self._mv[slot_offset : slot_offset + data_len] = data
+        offset = HEADER_SIZE + (write_idx % capacity) * slot_size
+        self._mv[offset:offset + slot_size] = data
 
-        # Advance write index
-        HEADER_STRUCT.pack_into(self._mv, 0, w + 1, r, cap, slot_sz)
+        HEADER_STRUCT.pack_into(
+            self._mv, 0,
+            write_idx + 1, read_idx, capacity, slot_size,
+        )
         return True
 
     def read(self) -> Optional[bytes]:
-        """
-        Read the next binary item from the ring buffer.
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
 
-        Returns:
-            bytes containing the slot payload, or None if the buffer is empty.
-        """
-        w, r, cap, slot_sz = HEADER_STRUCT.unpack_from(self._mv, 0)
-        if r >= w:
-            return None  # Buffer empty
+        write_idx, read_idx, capacity, slot_size = self._header()
 
-        slot_offset = HEADER_SIZE + ((r % cap) * slot_sz)
-        data = bytes(self._mv[slot_offset : slot_offset + slot_sz])
+        if read_idx >= write_idx:
+            return None
 
-        # Advance read index
-        HEADER_STRUCT.pack_into(self._mv, 0, w, r + 1, cap, slot_sz)
+        offset = HEADER_SIZE + (read_idx % capacity) * slot_size
+        data = bytes(self._mv[offset:offset + slot_size])
+
+        HEADER_STRUCT.pack_into(
+            self._mv, 0,
+            write_idx, read_idx + 1, capacity, slot_size,
+        )
         return data
 
     def reset(self):
-        """Reset write and read indices to 0."""
-        HEADER_STRUCT.pack_into(self._mv, 0, 0, 0, self.capacity, self.slot_size)
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
+
+        _, _, capacity, slot_size = self._header()
+        HEADER_STRUCT.pack_into(
+            self._mv, 0, 0, 0, capacity, slot_size
+        )
+
+    def flush(self):
+        if self._mmap_buf is None:
+            raise ValueError("Ring buffer is closed")
+        self._mmap_buf.flush()
 
     def close(self):
-        """Release the memory view and underlying mmap buffer."""
-        if getattr(self, "_mv", None) is not None:
+        if self._mv is not None:
             self._mv.release()
             self._mv = None
-        if getattr(self, "_mmap_buf", None) is not None:
+
+        if self._owns_buffer and self._mmap_buf is not None:
             self._mmap_buf.close()
-            self._mmap_buf = None
+
+        self._mmap_buf = None
+
+    def __enter__(self):
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False

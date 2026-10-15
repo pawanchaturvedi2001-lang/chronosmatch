@@ -50,6 +50,12 @@ class MmapBuffer:
         """Returns a zero-copy memoryview of the mapped memory."""
         return memoryview(self.mm)
 
+    def flush(self):
+        """Write changes in the memory map to the backing storage."""
+        if self.mm is not None:
+            self.mm.flush()
+
+
     def close(self):
         """Release and close mmap resources."""
         if hasattr(self, "mm") and self.mm is not None:

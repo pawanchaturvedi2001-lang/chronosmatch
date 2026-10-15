@@ -40,6 +40,12 @@ class MarketSimulator:
 
         written = 0
         while written < count:
+            if self.buffer.is_full():
+                if not wait_when_full:
+                    return written
+                await asyncio.sleep(full_sleep)
+                continue
+
             payload = self.make_order()
 
             while not self.buffer.write(payload):

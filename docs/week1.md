@@ -37,3 +37,19 @@ throughput for producing the requested number of serialized orders. Results
 depend on the machine and Python runtime; they are measurements, not a
 performance guarantee. The benchmark does not measure matching-engine
 throughput or file-backed persistence.
+
+## Binary Order Format
+
+Orders are serialized into a fixed-size 29-byte binary record using the
+format `<QdIBQ`:
+
+- `Q`: 8-byte unsigned order ID.
+- `d`: 8-byte floating-point price.
+- `I`: 4-byte unsigned quantity.
+- `B`: 1-byte side value (`BUY` or `SELL`).
+- `Q`: 8-byte unsigned timestamp.
+
+The fields are stored in little-endian byte order. The fixed-size representation
+allows the ring buffer to store and transfer orders without variable-length
+records. Use `pack_order` and `unpack_order` from `ipc/structures.py` to
+serialize and deserialize orders consistently.

@@ -175,6 +175,80 @@ class TestDjangoTradingTerminal(TestCase):
         self.assertEqual(mkt["metrics"]["orders_processed"], 0)
         self.assertEqual(mkt["metrics"]["trades_executed"], 0)
 
+    def test_api_market_overview(self):
+        """Verify GET /api/market/ returns valid market overview structure."""
+        response = self.client.get("/api/market/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["symbol"], "CHRONOS/USD")
+        self.assertEqual(data["status"], "online")
+        self.assertIn("last_price", data)
+        self.assertIn("best_bid", data)
+        self.assertIn("best_ask", data)
+        self.assertIn("spread", data)
+        self.assertIn("uptime_sec", data)
+
+    def test_api_orderbook(self):
+        """Verify GET /api/orderbook/ returns Level 2 bids and asks."""
+        # Insert a bid and ask first
+        self.client.post(
+            "/api/orders/",
+            data=json.dumps({"side": "BUY", "price": 99.50, "quantity": 100}),
+            content_type="application/json",
+        )
+        self.client.post(
+            "/api/orders/",
+            data=json.dumps({"side": "SELL", "price": 100.50, "quantity": 200}),
+            content_type="application/json",
+        )
+
+        response = self.client.get("/api/orderbook/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("bids", data)
+        self.assertIn("asks", data)
+        self.assertEqual(len(data["bids"]), 1)
+        self.assertEqual(len(data["asks"]), 1)
+        self.assertEqual(data["best_bid"], [99.50, 100])
+        self.assertEqual(data["best_ask"], [100.50, 200])
+        self.assertEqual(data["spread"], 1.00)
+
+    def test_api_trades(self):
+        """Verify GET /api/trades/ returns execution trade records."""
+        # Cross orders to generate a trade
+        self.client.post(
+            "/api/orders/",
+            data=json.dumps({"side": "SELL", "price": 100.00, "quantity": 50}),
+            content_type="application/json",
+        )
+        self.client.post(
+            "/api/orders/",
+            data=json.dumps({"side": "BUY", "price": 100.00, "quantity": 50}),
+            content_type="application/json",
+        )
+
+        response = self.client.get("/api/trades/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("trades", data)
+        self.assertGreaterEqual(len(data["trades"]), 1)
+        self.assertEqual(data["trades"][0]["price"], 100.00)
+        self.assertEqual(data["trades"][0]["quantity"], 50)
+
+    def test_api_metrics(self):
+        """Verify GET /api/metrics/ returns throughput and latency percentiles."""
+        response = self.client.get("/api/metrics/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("throughput_ops", data)
+        self.assertIn("latency", data)
+        self.assertIn("match_mean_us", data["latency"])
+        self.assertIn("match_p95_us", data["latency"])
+        self.assertIn("match_p99_us", data["latency"])
+        self.assertIn("e2e_mean_us", data["latency"])
+        self.assertIn("engine_mode", data)
+
 
 if __name__ == "__main__":
     unittest.main()
+

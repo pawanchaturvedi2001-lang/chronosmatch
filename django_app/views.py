@@ -9,6 +9,7 @@ from django.http import JsonResponse, HttpRequest, HttpResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt
 import json
+import time
 
 from core.order_book import IS_NATIVE_CYTHON
 from django_app.engine_service import get_engine_service
@@ -39,13 +40,72 @@ def health_check(request: HttpRequest) -> JsonResponse:
         "is_native_cython": IS_NATIVE_CYTHON,
         "simulator_running": service.simulator_running,
         "orders_processed": service.orders_processed,
+        "trades_executed": service.trades_executed,
+        "uptime_sec": round(time.time() - service.start_time, 1),
     })
+
+
+@require_GET
+def market_overview_api(request: HttpRequest) -> JsonResponse:
+    """
+    GET /api/market/
+    Market overview returning current price, session high/low, best bid/ask, and spread.
+    """
+    service = get_engine_service()
+    data = service.get_market_overview()
+    return JsonResponse(data)
+
+
+@require_GET
+def orderbook_api(request: HttpRequest) -> JsonResponse:
+    """
+    GET /api/orderbook/
+    Level 2 order book depth with bids and asks lists.
+    """
+    levels = request.GET.get("levels", 20)
+    try:
+        levels = max(1, min(100, int(levels)))
+    except (ValueError, TypeError):
+        levels = 20
+
+    service = get_engine_service()
+    data = service.get_orderbook_data(levels=levels)
+    return JsonResponse(data)
+
+
+@require_GET
+def trades_api(request: HttpRequest) -> JsonResponse:
+    """
+    GET /api/trades/
+    Recent executed trades tape.
+    """
+    limit = request.GET.get("limit", 50)
+    try:
+        limit = max(1, min(200, int(limit)))
+    except (ValueError, TypeError):
+        limit = 50
+
+    service = get_engine_service()
+    data = service.get_trades_data(limit=limit)
+    return JsonResponse(data)
+
+
+@require_GET
+def metrics_api(request: HttpRequest) -> JsonResponse:
+    """
+    GET /api/metrics/
+    Real-time throughput and microsecond latency percentiles.
+    """
+    service = get_engine_service()
+    data = service.get_metrics_data()
+    return JsonResponse(data)
 
 
 @require_GET
 def market_data_feed(request: HttpRequest) -> JsonResponse:
     """
-    Real-time market data feed returning current book depth, best bid/ask,
+    GET /api/market-data/
+    Real-time consolidated market data feed returning current book depth, best bid/ask,
     recent trades, throughput, and latency percentiles.
     """
     service = get_engine_service()
@@ -127,3 +187,4 @@ def reset_book_api(request: HttpRequest) -> JsonResponse:
     service = get_engine_service()
     success, message = service.reset_book()
     return JsonResponse({"success": success, "message": message})
+

@@ -14,7 +14,7 @@ from ipc.structures import Order, Side, ORDER_SIZE, pack_order, unpack_order
 from ipc.ring_buffer import RingBuffer
 from core.order_book import LimitOrderBook, IS_NATIVE_CYTHON
 from core.models import Trade, PriceLevel
-from simulator.market_simulator import run_simulator
+from simulator.market_simulator import MarketSimulator, OrderGeneratorConfig, run_simulator
 
 
 class MarketEngineService:
@@ -35,6 +35,10 @@ class MarketEngineService:
         self.trades_executed = 0
         self.total_volume = 0
         self.last_price: Optional[float] = None
+        self.opening_price: Optional[float] = None
+        self.session_high: Optional[float] = None
+        self.session_low: Optional[float] = None
+        self.start_time = time.time()
         self._manual_order_counter = 900_000
 
         # Latency sliding window in microseconds
@@ -51,6 +55,7 @@ class MarketEngineService:
         self._sim_thread: Optional[threading.Thread] = None
         self._sim_stop_event = threading.Event()
         self._active_ring_buffer: Optional[RingBuffer] = None
+        self._current_simulator: Optional[MarketSimulator] = None
 
     @classmethod
     def get_instance(cls) -> "MarketEngineService":
@@ -120,6 +125,12 @@ class MarketEngineService:
             if trades:
                 self.last_price = trades[-1].price
                 self.total_volume += filled_qty
+                if self.opening_price is None:
+                    self.opening_price = self.last_price
+                if self.session_high is None or self.last_price > self.session_high:
+                    self.session_high = self.last_price
+                if self.session_low is None or self.last_price < self.session_low:
+                    self.session_low = self.last_price
 
             if filled_qty == qty:
                 status = "FILLED"
@@ -168,6 +179,18 @@ class MarketEngineService:
         batch_size = 500
         stop_consumer = asyncio.Event()
 
+        rate_param = target_rate if target_rate > 0 else None
+        simulator = MarketSimulator(
+            ring_buffer=ring_buffer,
+            config=OrderGeneratorConfig(
+                total_orders=total_orders,
+                target_orders_per_sec=rate_param,
+            ),
+            batch_size=batch_size,
+            backpressure_mode="wait",
+        )
+        self._current_simulator = simulator
+
         async def _consumer():
             rb_read = ring_buffer.read
             process_order = self.lob.process_order
@@ -176,6 +199,7 @@ class MarketEngineService:
 
             while not stop_consumer.is_set():
                 if self._sim_stop_event.is_set():
+                    simulator.stop()
                     break
 
                 batch_count = 0
@@ -204,6 +228,12 @@ class MarketEngineService:
                         if trades:
                             self.last_price = trades[-1].price
                             self.total_volume += sum(t.quantity for t in trades)
+                            if self.opening_price is None:
+                                self.opening_price = self.last_price
+                            if self.session_high is None or self.last_price > self.session_high:
+                                self.session_high = self.last_price
+                            if self.session_low is None or self.last_price < self.session_low:
+                                self.session_low = self.last_price
 
                     batch_count += 1
 
@@ -223,19 +253,18 @@ class MarketEngineService:
                     if trades:
                         self.last_price = trades[-1].price
                         self.total_volume += sum(t.quantity for t in trades)
+                        if self.opening_price is None:
+                            self.opening_price = self.last_price
+                        if self.session_high is None or self.last_price > self.session_high:
+                            self.session_high = self.last_price
+                        if self.session_low is None or self.last_price < self.session_low:
+                            self.session_low = self.last_price
 
         consumer_task = asyncio.create_task(_consumer())
 
         try:
-            rate_param = target_rate if target_rate > 0 else None
-            await run_simulator(
-                ring_buffer=ring_buffer,
-                total_orders=total_orders,
-                target_orders_per_sec=rate_param,
-                batch_size=batch_size,
-                backpressure_mode="wait",
-            )
-        except Exception as e:
+            await simulator.run()
+        except Exception:
             pass
         finally:
             stop_consumer.set()
@@ -244,15 +273,19 @@ class MarketEngineService:
             with self._lock:
                 self.simulator_running = False
                 self._active_ring_buffer = None
+                self._current_simulator = None
 
     def stop_simulator(self) -> Tuple[bool, str]:
         """Stops an active background simulator."""
         self._sim_stop_event.set()
+        if self._current_simulator:
+            self._current_simulator.stop()
         if self._sim_thread and self._sim_thread.is_alive() and threading.current_thread() != self._sim_thread:
-            self._sim_thread.join(timeout=3.0)
+            self._sim_thread.join(timeout=2.0)
         with self._lock:
             self.simulator_running = False
-        return True, "Stop signal transmitted to simulator worker."
+            self._current_simulator = None
+        return True, "Simulator stopped successfully."
 
     def reset_book(self) -> Tuple[bool, str]:
         """Resets the Limit Order Book and trade tape to a fresh state."""
@@ -260,7 +293,7 @@ class MarketEngineService:
             self.stop_simulator()
         elif self._sim_thread and self._sim_thread.is_alive() and threading.current_thread() != self._sim_thread:
             self._sim_stop_event.set()
-            self._sim_thread.join(timeout=3.0)
+            self._sim_thread.join(timeout=2.0)
 
         with self._lock:
             self.lob = LimitOrderBook(tick_size=0.01)
@@ -268,12 +301,127 @@ class MarketEngineService:
             self.trades_executed = 0
             self.total_volume = 0
             self.last_price = None
+            self.opening_price = None
+            self.session_high = None
+            self.session_low = None
+            self.start_time = time.time()
             self.match_latencies.clear()
             self.e2e_latencies.clear()
             self._last_calc_time = time.perf_counter()
             self._last_orders_count = 0
             self.current_throughput = 0.0
             return True, "Limit Order Book and trade tape reset successfully."
+
+    def get_market_overview(self) -> Dict[str, Any]:
+        """Returns market overview snapshot for GET /api/market/."""
+        with self._lock:
+            best_bid = self.lob.get_best_bid()
+            best_ask = self.lob.get_best_ask()
+            spread = self.lob.get_spread()
+            price_change = 0.0
+            price_change_pct = 0.0
+            if self.last_price is not None and self.opening_price is not None and self.opening_price > 0:
+                price_change = round(self.last_price - self.opening_price, 2)
+                price_change_pct = round((price_change / self.opening_price) * 100.0, 2)
+            mid = round((best_bid[0] + best_ask[0]) / 2.0, 2) if (best_bid and best_ask) else None
+            return {
+                "symbol": "CHRONOS/USD",
+                "status": "online",
+                "engine_mode": "CYTHON NATIVE" if IS_NATIVE_CYTHON else "PURE PYTHON FALLBACK",
+                "is_native_cython": IS_NATIVE_CYTHON,
+                "simulator_running": self.simulator_running,
+                "last_price": self.last_price,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": spread,
+                "mid_price": mid,
+                "session_high": self.session_high,
+                "session_low": self.session_low,
+                "opening_price": self.opening_price,
+                "price_change": price_change,
+                "price_change_pct": price_change_pct,
+                "total_volume": self.total_volume,
+                "orders_processed": self.orders_processed,
+                "trades_executed": self.trades_executed,
+                "uptime_sec": round(time.time() - self.start_time, 1),
+                "timestamp": time.time(),
+            }
+
+    def get_orderbook_data(self, levels: int = 20) -> Dict[str, Any]:
+        """Returns Level 2 order book depth for GET /api/orderbook/."""
+        with self._lock:
+            bids_depth, asks_depth = self.lob.get_depth(levels=levels)
+            best_bid = self.lob.get_best_bid()
+            best_ask = self.lob.get_best_ask()
+            spread = self.lob.get_spread()
+            return {
+                "symbol": "CHRONOS/USD",
+                "bids": [{"price": b.price, "total_quantity": b.total_quantity, "order_count": b.order_count} for b in bids_depth],
+                "asks": [{"price": a.price, "total_quantity": a.total_quantity, "order_count": a.order_count} for a in asks_depth],
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": spread,
+                "depth_levels": len(bids_depth) + len(asks_depth),
+                "timestamp": time.time(),
+            }
+
+    def get_trades_data(self, limit: int = 50) -> Dict[str, Any]:
+        """Returns recent executed trades tape for GET /api/trades/."""
+        with self._lock:
+            trades_raw = self.lob.get_recent_trades(limit=limit)
+            trades_list = [
+                {
+                    "trade_id": t.trade_id,
+                    "price": t.price,
+                    "quantity": t.quantity,
+                    "buy_order_id": t.buy_order_id,
+                    "sell_order_id": t.sell_order_id,
+                    "timestamp_ns": t.timestamp_ns,
+                }
+                for t in trades_raw
+            ]
+            return {
+                "symbol": "CHRONOS/USD",
+                "trades": trades_list,
+                "total_trades": self.trades_executed,
+                "total_volume": self.total_volume,
+                "timestamp": time.time(),
+            }
+
+    def get_metrics_data(self) -> Dict[str, Any]:
+        """Returns performance and microsecond latency metrics for GET /api/metrics/."""
+        with self._lock:
+            def _percentiles(samples: deque):
+                if not samples:
+                    return 0.0, 0.0, 0.0
+                s = sorted(samples)
+                n = len(s)
+                mean_v = sum(s) / n
+                p95_v = s[min(int(n * 0.95), n - 1)]
+                p99_v = s[min(int(n * 0.99), n - 1)]
+                return round(mean_v, 2), round(p95_v, 2), round(p99_v, 2)
+
+            m_mean, m_p95, m_p99 = _percentiles(self.match_latencies)
+            e_mean, e_p95, e_p99 = _percentiles(self.e2e_latencies)
+
+            return {
+                "engine_mode": "CYTHON NATIVE" if IS_NATIVE_CYTHON else "PURE PYTHON FALLBACK",
+                "is_native_cython": IS_NATIVE_CYTHON,
+                "orders_processed": self.orders_processed,
+                "trades_executed": self.trades_executed,
+                "total_volume": self.total_volume,
+                "throughput_ops": round(self.current_throughput, 1),
+                "latency": {
+                    "match_mean_us": m_mean,
+                    "match_p95_us": m_p95,
+                    "match_p99_us": m_p99,
+                    "e2e_mean_us": e_mean,
+                    "e2e_p95_us": e_p95,
+                    "e2e_p99_us": e_p99,
+                },
+                "uptime_sec": round(time.time() - self.start_time, 1),
+                "timestamp": time.time(),
+            }
 
     def get_market_data(self) -> Dict[str, Any]:
         """
@@ -324,6 +472,13 @@ class MarketEngineService:
             m_mean, m_p95, m_p99 = _percentiles(self.match_latencies)
             e_mean, e_p95, e_p99 = _percentiles(self.e2e_latencies)
 
+            # Price change calculations
+            price_change = 0.0
+            price_change_pct = 0.0
+            if self.last_price is not None and self.opening_price is not None and self.opening_price > 0:
+                price_change = round(self.last_price - self.opening_price, 2)
+                price_change_pct = round((price_change / self.opening_price) * 100.0, 2)
+
             return {
                 "engine_mode": "CYTHON NATIVE" if IS_NATIVE_CYTHON else "PURE PYTHON FALLBACK",
                 "is_native_cython": IS_NATIVE_CYTHON,
@@ -333,11 +488,24 @@ class MarketEngineService:
                 "best_bid": best_bid,
                 "best_ask": best_ask,
                 "spread": spread,
+                "session_high": self.session_high,
+                "session_low": self.session_low,
+                "opening_price": self.opening_price,
+                "price_change": price_change,
+                "price_change_pct": price_change_pct,
+                "uptime_sec": round(time.time() - self.start_time, 1),
                 "depth": {
                     "bids": [{"price": b.price, "total_quantity": b.total_quantity, "order_count": b.order_count} for b in bids_depth],
                     "asks": [{"price": a.price, "total_quantity": a.total_quantity, "order_count": a.order_count} for a in asks_depth],
                 },
                 "recent_trades": trades_list,
+                "system_health": {
+                    "django_api": {"status": "OPERATIONAL", "detail": "HTTP REST / 200 OK"},
+                    "cython_engine": {"status": "OPERATIONAL" if IS_NATIVE_CYTHON else "FALLBACK", "mode": "CYTHON NATIVE" if IS_NATIVE_CYTHON else "PURE PYTHON"},
+                    "ring_buffer": {"status": "OPERATIONAL", "mode": "Shared-Memory mmap", "slots": 65536, "slot_size": ORDER_SIZE},
+                    "market_simulator": {"status": "RUNNING" if self.simulator_running else "IDLE"},
+                    "order_book": {"status": "OPERATIONAL", "levels": len(bids_depth) + len(asks_depth)},
+                },
                 "metrics": {
                     "orders_processed": self.orders_processed,
                     "trades_executed": self.trades_executed,

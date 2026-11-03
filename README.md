@@ -163,9 +163,9 @@ python -m core.engine --orders 100000 --rate 0
 
 ## 7. Running Tests & Benchmarks
 
-### Execute Full Test Suite (40 Tests)
+### Execute Full Test Suite (44 Tests)
 ```powershell
-python -m unittest discover tests -v
+python -m pytest tests/ -v
 ```
 
 ### Run Matching Engine Benchmarks
@@ -185,7 +185,11 @@ python benchmarks/matching_engine_benchmark.py --orders 100000
 
 | Endpoint | Method | Description |
 | :--- | :---: | :--- |
-| `/api/health/` | `GET` | System health check and engine mode. |
+| `/api/health/` | `GET` | System health check, Cython engine mode, and service uptime. |
+| `/api/market/` | `GET` | Market overview: last price, best bid/ask, spread, session stats. |
+| `/api/orderbook/` | `GET` | Level 2 Order Book depth levels (`bids` and `asks` arrays). |
+| `/api/trades/` | `GET` | Recent executed trades tape with prices, sizes, and timestamps. |
+| `/api/metrics/` | `GET` | Throughput (ops/sec) and latency percentiles (Mean, P95, P99 in µs). |
 | `/api/market-data/` | `GET` | Snapshot of Level 2 depth, best bid/ask, recent trades, throughput, and latencies. |
 | `/api/orders/` | `POST` | Submit simulated manual BUY/SELL order (`{"side": "BUY", "price": 100.5, "quantity": 50}`). |
 | `/api/simulator/start/` | `POST` | Start background simulator (`{"orders": 5000, "rate": 25000}`). |

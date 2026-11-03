@@ -1,10 +1,12 @@
-﻿"""Memory-mapped FIFO ring buffer for ChronosMatch."""
+﻿
+"""Memory-mapped FIFO ring buffer for ChronosMatch."""
 
 import struct
 from typing import Optional
 
 from ipc.mmap_buffer import MmapBuffer
 from ipc.structures import ORDER_SIZE
+
 
 HEADER_FORMAT = "<QQII"
 HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
@@ -20,14 +22,15 @@ class RingBuffer:
 
     def __init__(
         self,
-        capacity: int = 65536,
-        slot_size: int = ORDER_SIZE,
-        mmap_buffer: Optional[MmapBuffer] = None,
-        filepath: Optional[str] = None,
-        create: bool = True,
+        capacity=65536,
+        slot_size=ORDER_SIZE,
+        mmap_buffer=None,
+        filepath=None,
+        create=True,
     ):
         if capacity <= 0:
             raise ValueError("Capacity must be positive")
+
         if slot_size <= 0:
             raise ValueError("Slot size must be positive")
 
@@ -56,9 +59,12 @@ class RingBuffer:
                     self._mv, 0, 0, 0, capacity, slot_size
                 )
             else:
-                _, _, saved_capacity, saved_slot_size = (
-                    HEADER_STRUCT.unpack_from(self._mv, 0)
-                )
+                (
+                    _,
+                    _,
+                    saved_capacity,
+                    saved_slot_size,
+                ) = HEADER_STRUCT.unpack_from(self._mv, 0)
 
                 if saved_capacity <= 0 or saved_slot_size <= 0:
                     raise ValueError("Invalid ring buffer header")
@@ -70,6 +76,7 @@ class RingBuffer:
                     raise ValueError("Saved slot size does not match")
 
             required_size = HEADER_SIZE + capacity * slot_size
+
             if len(self._mv) < required_size:
                 raise ValueError("Mapped buffer is too small")
 
@@ -78,36 +85,55 @@ class RingBuffer:
             raise
 
     def _header(self):
-        return HEADER_STRUCT.unpack_from(self._mv, 0)
+        """Read and validate ring buffer metadata."""
+
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
+
+        write_idx, read_idx, capacity, slot_size = (
+            HEADER_STRUCT.unpack_from(self._mv, 0)
+        )
+
+        if (
+            capacity != self.capacity
+            or slot_size != self.slot_size
+            or read_idx > write_idx
+            or write_idx - read_idx > capacity
+        ):
+            raise ValueError("Invalid ring buffer header")
+
+        return write_idx, read_idx, capacity, slot_size
 
     @property
-    def write_idx(self) -> int:
+    def write_idx(self):
         return self._header()[0]
 
     @property
-    def read_idx(self) -> int:
+    def read_idx(self):
         return self._header()[1]
 
     @property
-    def size(self) -> int:
+    def size(self):
         write_idx, read_idx, _, _ = self._header()
         return write_idx - read_idx
 
     @property
-    def available_write(self) -> int:
+    def available_write(self):
         return self.capacity - self.size
 
     @property
-    def available_read(self) -> int:
+    def available_read(self):
         return self.size
 
-    def is_empty(self) -> bool:
+    def is_empty(self):
         return self.size == 0
 
-    def is_full(self) -> bool:
+    def is_full(self):
         return self.size >= self.capacity
 
-    def write(self, data: bytes) -> bool:
+    def write(self, data):
+        """Write one fixed-size record. Return False if the buffer is full."""
+
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -122,15 +148,23 @@ class RingBuffer:
             return False
 
         offset = HEADER_SIZE + (write_idx % capacity) * slot_size
+
         self._mv[offset:offset + slot_size] = data
 
         HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            write_idx + 1, read_idx, capacity, slot_size,
+            self._mv,
+            0,
+            write_idx + 1,
+            read_idx,
+            capacity,
+            slot_size,
         )
+
         return True
 
-    def read(self) -> Optional[bytes]:
+    def read(self):
+        """Read and remove the next record. Return None if empty."""
+
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -140,29 +174,43 @@ class RingBuffer:
             return None
 
         offset = HEADER_SIZE + (read_idx % capacity) * slot_size
+
         data = bytes(self._mv[offset:offset + slot_size])
 
         HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            write_idx, read_idx + 1, capacity, slot_size,
+            self._mv,
+            0,
+            write_idx,
+            read_idx + 1,
+            capacity,
+            slot_size,
         )
+
         return data
 
     def reset(self):
+        """Remove all queued records."""
+
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
         _, _, capacity, slot_size = self._header()
+
         HEADER_STRUCT.pack_into(
             self._mv, 0, 0, 0, capacity, slot_size
         )
 
     def flush(self):
+        """Flush memory-mapped data to storage."""
+
         if self._mmap_buf is None:
             raise ValueError("Ring buffer is closed")
+
         self._mmap_buf.flush()
 
     def close(self):
+        """Release the memory view and close an owned buffer."""
+
         if self._mv is not None:
             self._mv.release()
             self._mv = None
@@ -173,8 +221,6 @@ class RingBuffer:
         self._mmap_buf = None
 
     def __enter__(self):
-        if self._mv is None:
-            raise ValueError("Ring buffer is closed")
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

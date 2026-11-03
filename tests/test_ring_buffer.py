@@ -86,3 +86,15 @@ def test_file_backed_reopen(tmp_path):
         data = reader.read()
         assert data is not None
         assert unpack_order(data).order_id == 42
+
+
+def test_corrupted_header_is_rejected():
+    from ipc.ring_buffer import HEADER_STRUCT
+
+    with RingBuffer(capacity=3) as ring:
+        HEADER_STRUCT.pack_into(
+            ring._mv, 0, 5, 1, 3, ORDER_SIZE
+        )
+
+        with pytest.raises(ValueError, match="Invalid ring buffer header"):
+            ring.write(make_order(99))

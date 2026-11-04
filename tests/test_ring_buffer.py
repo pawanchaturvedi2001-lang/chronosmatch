@@ -98,3 +98,23 @@ def test_corrupted_header_is_rejected():
 
         with pytest.raises(ValueError, match="Invalid ring buffer header"):
             ring.write(make_order(99))
+
+
+def test_reset_clears_buffer_and_allows_reuse():
+    with RingBuffer(capacity=3) as ring:
+        assert ring.write(make_order(1))
+        assert ring.write(make_order(2))
+
+        ring.reset()
+
+        assert ring.is_empty()
+        assert ring.size == 0
+        assert ring.available_write == 3
+        assert ring.available_read == 0
+        assert ring.read() is None
+
+        assert ring.write(make_order(3))
+        data = ring.read()
+
+        assert data is not None
+        assert unpack_order(data).order_id == 3

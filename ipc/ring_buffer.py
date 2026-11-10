@@ -2,7 +2,6 @@
 """Memory-mapped FIFO ring buffer for ChronosMatch."""
 
 import struct
-from typing import Optional
 
 from ipc.mmap_buffer import MmapBuffer
 from ipc.structures import ORDER_SIZE
@@ -37,7 +36,6 @@ class RingBuffer:
     ):
         if capacity <= 0:
             raise ValueError("Capacity must be positive")
-
         if slot_size <= 0:
             raise ValueError("Slot size must be positive")
 
@@ -75,16 +73,12 @@ class RingBuffer:
 
                 if saved_capacity <= 0 or saved_slot_size <= 0:
                     raise ValueError("Invalid ring buffer header")
-
                 if saved_capacity != capacity:
                     raise ValueError("Saved capacity does not match")
-
                 if saved_slot_size != slot_size:
                     raise ValueError("Saved slot size does not match")
 
-            required_size = HEADER_SIZE + capacity * slot_size
-
-            if len(self._mv) < required_size:
+            if len(self._mv) < total_size:
                 raise ValueError("Mapped buffer is too small")
 
         except Exception:
@@ -138,59 +132,85 @@ class RingBuffer:
         return self.size >= self.capacity
 
     def write(self, data):
-        """Write one fixed-size record. Return False if the buffer is full."""
+        """Write one fixed-size record."""
+        return self.write_many([data]) == 1
+
+    def write_many(self, records):
+        """Write multiple fixed-size records and return the count written."""
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
-        if len(data) != self.slot_size:
-            raise ValueError(
-                f"Record must be exactly {self.slot_size} bytes"
+        records = list(records)
+
+        for data in records:
+            if len(data) != self.slot_size:
+                raise ValueError(
+                    f"Record must be exactly {self.slot_size} bytes"
+                )
+
+        if not records:
+            return 0
+
+        write_idx, read_idx, capacity, slot_size = self._header()
+        available = capacity - (write_idx - read_idx)
+        count = min(len(records), available)
+
+        for i in range(count):
+            offset = (
+                HEADER_SIZE
+                + ((write_idx + i) % capacity) * slot_size
+            )
+            self._mv[offset:offset + slot_size] = records[i]
+
+        if count:
+            HEADER_STRUCT.pack_into(
+                self._mv,
+                0,
+                write_idx + count,
+                read_idx,
+                capacity,
+                slot_size,
             )
 
-        write_idx, read_idx, capacity, slot_size = self._header()
-
-        if write_idx - read_idx >= capacity:
-            return False
-
-        offset = HEADER_SIZE + (write_idx % capacity) * slot_size
-
-        self._mv[offset:offset + slot_size] = data
-
-        HEADER_STRUCT.pack_into(
-            self._mv,
-            0,
-            write_idx + 1,
-            read_idx,
-            capacity,
-            slot_size,
-        )
-
-        return True
+        return count
 
     def read(self):
-        """Read and remove the oldest record, or return None if empty."""
+        """Read and remove the oldest record."""
+        records = self.read_many(1)
+        return records[0] if records else None
+
+    def read_many(self, max_records):
+        """Read multiple records and return them in FIFO order."""
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
+        if max_records < 0:
+            raise ValueError("max_records must not be negative")
+        if max_records == 0:
+            return []
 
         write_idx, read_idx, capacity, slot_size = self._header()
+        count = min(max_records, write_idx - read_idx)
 
-        if read_idx >= write_idx:
-            return None
+        records = []
 
-        offset = HEADER_SIZE + (read_idx % capacity) * slot_size
+        for i in range(count):
+            offset = (
+                HEADER_SIZE
+                + ((read_idx + i) % capacity) * slot_size
+            )
+            records.append(bytes(self._mv[offset:offset + slot_size]))
 
-        data = bytes(self._mv[offset:offset + slot_size])
+        if count:
+            HEADER_STRUCT.pack_into(
+                self._mv,
+                0,
+                write_idx,
+                read_idx + count,
+                capacity,
+                slot_size,
+            )
 
-        HEADER_STRUCT.pack_into(
-            self._mv,
-            0,
-            write_idx,
-            read_idx + 1,
-            capacity,
-            slot_size,
-        )
-
-        return data
+        return records
 
     def reset(self):
         """Clear the buffer and reset its read and write positions."""
@@ -198,7 +218,6 @@ class RingBuffer:
             raise ValueError("Ring buffer is closed")
 
         _, _, capacity, slot_size = self._header()
-
         HEADER_STRUCT.pack_into(
             self._mv, 0, 0, 0, capacity, slot_size
         )

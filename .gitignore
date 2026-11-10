@@ -9,3 +9,4 @@ venv/
 *.bin
 .coverage
 htmlcov/
+benchmarks/process_test/shared_buffer.dat

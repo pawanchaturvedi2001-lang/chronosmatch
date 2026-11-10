@@ -1,7 +1,14 @@
+
 import pytest
 
-from ipc.ring_buffer import RingBuffer
-from ipc.structures import ORDER_SIZE, Order, Side, pack_order, unpack_order
+from ipc.ring_buffer import RingBuffer, HEADER_STRUCT
+from ipc.structures import (
+    ORDER_SIZE,
+    Order,
+    Side,
+    pack_order,
+    unpack_order,
+)
 
 
 def make_order(order_id):
@@ -53,7 +60,9 @@ def test_wraparound():
         assert ring.write(make_order(2))
 
         assert unpack_order(ring.read()).order_id == 1
+
         assert ring.write(make_order(3))
+
         assert unpack_order(ring.read()).order_id == 2
         assert unpack_order(ring.read()).order_id == 3
 
@@ -89,8 +98,6 @@ def test_file_backed_reopen(tmp_path):
 
 
 def test_corrupted_header_is_rejected():
-    from ipc.ring_buffer import HEADER_STRUCT
-
     with RingBuffer(capacity=3) as ring:
         HEADER_STRUCT.pack_into(
             ring._mv, 0, 5, 1, 3, ORDER_SIZE
@@ -114,7 +121,78 @@ def test_reset_clears_buffer_and_allows_reuse():
         assert ring.read() is None
 
         assert ring.write(make_order(3))
-        data = ring.read()
 
+        data = ring.read()
         assert data is not None
         assert unpack_order(data).order_id == 3
+
+
+# Batch-operation tests
+
+def test_write_many_and_read_many():
+    with RingBuffer(capacity=5) as ring:
+        records = [make_order(i) for i in range(1, 4)]
+
+        written = ring.write_many(records)
+        assert written == 3
+
+        received = ring.read_many(3)
+        assert len(received) == 3
+
+        order_ids = [unpack_order(data).order_id for data in received]
+        assert order_ids == [1, 2, 3]
+
+        assert ring.is_empty()
+
+
+def test_write_many_partial_when_buffer_is_full():
+    with RingBuffer(capacity=2) as ring:
+        records = [make_order(i) for i in range(1, 4)]
+
+        written = ring.write_many(records)
+
+        assert written == 2
+        assert ring.is_full()
+
+        received = ring.read_many(5)
+        order_ids = [unpack_order(data).order_id for data in received]
+
+        assert order_ids == [1, 2]
+
+
+def test_read_many_from_empty_buffer():
+    with RingBuffer(capacity=3) as ring:
+        assert ring.read_many(3) == []
+
+
+def test_batch_operations_support_wraparound():
+    with RingBuffer(capacity=3) as ring:
+        assert ring.write_many(
+            [make_order(1), make_order(2)]
+        ) == 2
+
+        first = ring.read_many(1)
+        assert unpack_order(first[0]).order_id == 1
+
+        assert ring.write_many(
+            [make_order(3), make_order(4)]
+        ) == 2
+
+        received = ring.read_many(3)
+        order_ids = [unpack_order(data).order_id for data in received]
+
+        assert order_ids == [2, 3, 4]
+
+
+def test_write_many_rejects_invalid_record_size():
+    with RingBuffer(capacity=3) as ring:
+        with pytest.raises(ValueError):
+            ring.write_many([make_order(1), b"short"])
+
+        assert ring.is_empty()
+
+
+def test_read_many_rejects_negative_count():
+    with RingBuffer(capacity=3) as ring:
+        with pytest.raises(ValueError):
+            ring.read_many(-1)

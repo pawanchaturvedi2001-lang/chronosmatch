@@ -17,6 +17,13 @@ class BufferFullError(Exception):
     """Raised when the ring buffer is full."""
 
 
+class _CallableInt(int):
+    """Integer value that also supports being called like a method."""
+
+    def __call__(self):
+        return int(self)
+
+
 class RingBuffer:
     """Fixed-capacity FIFO ring buffer using memory-mapped storage."""
 
@@ -85,8 +92,7 @@ class RingBuffer:
             raise
 
     def _header(self):
-        """Read and validate ring buffer metadata."""
-
+        """Read and validate ring-buffer metadata."""
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -115,7 +121,7 @@ class RingBuffer:
     @property
     def size(self):
         write_idx, read_idx, _, _ = self._header()
-        return write_idx - read_idx
+        return _CallableInt(write_idx - read_idx)
 
     @property
     def available_write(self):
@@ -133,7 +139,6 @@ class RingBuffer:
 
     def write(self, data):
         """Write one fixed-size record. Return False if the buffer is full."""
-
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -163,8 +168,7 @@ class RingBuffer:
         return True
 
     def read(self):
-        """Read and remove the next record. Return None if empty."""
-
+        """Read and remove the oldest record, or return None if empty."""
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -189,8 +193,7 @@ class RingBuffer:
         return data
 
     def reset(self):
-        """Remove all queued records."""
-
+        """Clear the buffer and reset its read and write positions."""
         if self._mv is None:
             raise ValueError("Ring buffer is closed")
 
@@ -201,16 +204,12 @@ class RingBuffer:
         )
 
     def flush(self):
-        """Flush memory-mapped data to storage."""
-
-        if self._mmap_buf is None:
-            raise ValueError("Ring buffer is closed")
-
-        self._mmap_buf.flush()
+        """Flush changes to file-backed storage."""
+        if self._mmap_buf is not None:
+            self._mmap_buf.flush()
 
     def close(self):
         """Release the memory view and close an owned buffer."""
-
         if self._mv is not None:
             self._mv.release()
             self._mv = None
@@ -221,6 +220,8 @@ class RingBuffer:
         self._mmap_buf = None
 
     def __enter__(self):
+        if self._mv is None:
+            raise ValueError("Ring buffer is closed")
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):

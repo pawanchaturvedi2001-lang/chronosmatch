@@ -8,3 +8,13 @@ __pycache__/
 htmlcov/
 .pytest_cache/
 
+# Cython generated build files
+core/cython_engine/build/
+core/cython_engine/matching_engine.c
+core/cython_engine/*.exp
+core/cython_engine/*.lib
+core/cython_engine/*.obj
+
+# Python cache directories
+**/__pycache__/
+**/.pytest_cache/

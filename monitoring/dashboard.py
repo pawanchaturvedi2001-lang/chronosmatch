@@ -25,7 +25,7 @@ except ImportError:
     HAVE_CURSES = False
 
 from core.order_book import LimitOrderBook, IS_NATIVE_CYTHON
-from core.models import Trade, PriceLevel
+from core.models import Trade, PriceLevel, WhaleSweep
 
 
 def safe_addstr(stdscr, y: int, x: int, text: str, attr: int = 0):
@@ -116,22 +116,28 @@ class OrderBookDashboard:
         # Retrieve performance stats from engine if attached
         if self.engine is not None:
             stats = self.engine.get_performance_stats()
-            sim_status = stats["simulator_status"]
-            eng_status = stats["engine_status"]
-            m_mean = stats["match_latency_mean_us"]
-            m_p95 = stats["match_latency_p95_us"]
-            m_p99 = stats["match_latency_p99_us"]
-            e_mean = stats["e2e_latency_mean_us"]
-            e_p95 = stats["e2e_latency_p95_us"]
-            e_p99 = stats["e2e_latency_p99_us"]
-            throughput = stats["throughput_ops"]
-            orders_count = stats["orders_consumed"]
-            trades_count = stats["trades_generated"]
+            sim_status = stats.get("simulator_status", "N/A")
+            eng_status = stats.get("engine_status", "RUNNING")
+            m_mean = stats.get("match_latency_mean_us", 0.0)
+            m_p50 = stats.get("match_latency_p50_us", 0.0)
+            m_p95 = stats.get("match_latency_p95_us", 0.0)
+            m_p99 = stats.get("match_latency_p99_us", 0.0)
+            e_mean = stats.get("e2e_latency_mean_us", 0.0)
+            e_p50 = stats.get("e2e_latency_p50_us", 0.0)
+            e_p95 = stats.get("e2e_latency_p95_us", 0.0)
+            e_p99 = stats.get("e2e_latency_p99_us", 0.0)
+            throughput = stats.get("throughput_ops", 0.0)
+            orders_count = stats.get("orders_consumed", 0)
+            trades_count = stats.get("trades_generated", 0)
+            total_sweeps = stats.get("total_sweeps_detected", 0)
+            last_sweep = stats.get("last_sweep", None)
         else:
             sim_status = "N/A"
             eng_status = "RUNNING"
             orders_count = self.lob.total_orders_processed
             trades_count = self.lob.total_trades_executed
+            total_sweeps = getattr(self.lob, "total_sweeps_detected", 0)
+            last_sweep = getattr(self.lob, "last_sweep", None)
 
             now = time.perf_counter()
             dt = now - self._last_calc_time
@@ -145,9 +151,11 @@ class OrderBookDashboard:
             avg_lat_us = (self.lob.total_match_latency_ns / max(1, orders_count)) / 1000.0
             last_lat_us = self.lob.last_match_latency_ns / 1000.0
             m_mean = avg_lat_us
+            m_p50 = last_lat_us
             m_p95 = last_lat_us
             m_p99 = last_lat_us
             e_mean = 0.0
+            e_p50 = 0.0
             e_p95 = 0.0
             e_p99 = 0.0
 
@@ -161,7 +169,7 @@ class OrderBookDashboard:
 
         status_line = (
             f"Engine: {eng_status} | Mode: {mode_str} | "
-            f"Simulator: {sim_status} | Press 'q' to quit"
+            f"Simulator: {sim_status} | Sweeps: {total_sweeps} | Press 'q' to quit"
         )
         safe_addstr(stdscr, 1, max(0, (max_x - len(status_line)) // 2), status_line, color_cyan)
 
@@ -169,7 +177,7 @@ class OrderBookDashboard:
         safe_addstr(stdscr, 2, 0, "=" * (max_x - 1))
 
         # ======================================================================
-        # SECTION B: LIVE ORDER BOOK (Top 5 L2 Market Depth)
+        # SECTION B: LIVE ORDER BOOK (Top L2 Market Depth)
         # Required format: | Bid quantity | Bid price | Ask price | Ask quantity |
         # ======================================================================
         best_bid = self.lob.get_best_bid()
@@ -192,9 +200,10 @@ class OrderBookDashboard:
         start_x = 2
         safe_addstr(stdscr, row, start_x, col_header, underline | bold)
 
-        # Depth rows (Top 5 levels)
-        bids_depth, asks_depth = self.lob.get_depth(levels=5)
-        for i in range(5):
+        # Depth rows (Top 4 levels to leave room for Whale Sweep banner on 24-row terminals)
+        depth_levels = 4 if max_y <= 26 else 5
+        bids_depth, asks_depth = self.lob.get_depth(levels=depth_levels)
+        for i in range(depth_levels):
             curr_row = 5 + i
             # Format Bid Side
             if i < len(bids_depth):
@@ -218,18 +227,41 @@ class OrderBookDashboard:
             safe_addstr(stdscr, curr_row, start_x, line)
 
         # ======================================================================
-        # SECTION C: RECENT EXECUTED TRADES
+        # SECTION C: WHALE ORDER SWEEP NOTIFICATION & HIGHLIGHT
         # ======================================================================
-        safe_addstr(stdscr, 10, 0, "-" * (max_x - 1))
-        safe_addstr(stdscr, 11, 2, "RECENT EXECUTED TRADES", color_cyan | bold)
+        sweep_div_row = 5 + depth_levels
+        safe_addstr(stdscr, sweep_div_row, 0, "-" * (max_x - 1))
+        sweep_row = sweep_div_row + 1
+
+        if last_sweep is not None:
+            res_note = f" [residual: {last_sweep.residual_quantity:,}]" if last_sweep.residual_quantity > 0 else " [fully filled]"
+            sweep_msg = (
+                f">> WHALE SWEEP ALERT: Order #{last_sweep.order_id} ({last_sweep.side}) swept "
+                f"{last_sweep.levels_swept} levels! Filled {last_sweep.total_quantity:,} shares "
+                f"({last_sweep.start_price:.2f} -> {last_sweep.end_price:.2f}) across {last_sweep.trades_count} trades{res_note} <<"
+            )
+            safe_addstr(stdscr, sweep_row, 2, sweep_msg, color_yellow | bold)
+        else:
+            safe_addstr(stdscr, sweep_row, 2, "Whale Sweep Monitor: [NORMAL - No multi-level sweeps detected]", color_green)
+
+        # ======================================================================
+        # SECTION D: RECENT EXECUTED TRADES
+        # ======================================================================
+        trade_div_row = sweep_row + 1
+        safe_addstr(stdscr, trade_div_row, 0, "-" * (max_x - 1))
+        trade_hdr_row = trade_div_row + 1
+        safe_addstr(stdscr, trade_hdr_row, 2, "RECENT EXECUTED TRADES", color_cyan | bold)
 
         trades_header = "| Time     | Trade ID   | Price      | Quantity | Buy Order  | Sell Order |"
-        safe_addstr(stdscr, 12, 2, trades_header, underline)
+        trade_tbl_hdr = trade_hdr_row + 1
+        safe_addstr(stdscr, trade_tbl_hdr, 2, trades_header, underline)
 
-        recent_trades = self.lob.get_recent_trades(limit=5)
+        # Show 3-5 recent trades depending on terminal size
+        max_trades_show = max(2, min(5, max_y - (trade_tbl_hdr + 7)))
+        recent_trades = self.lob.get_recent_trades(limit=max_trades_show)
         if recent_trades:
             for idx, t in enumerate(recent_trades):
-                curr_row = 13 + idx
+                curr_row = trade_tbl_hdr + 1 + idx
                 ts_str = time.strftime("%H:%M:%S", time.localtime(t.timestamp_ns / 1e9))
                 t_line = (
                     f"| {ts_str:<8} | #{t.trade_id:<9} | {t.price:<10.2f} | "
@@ -237,40 +269,44 @@ class OrderBookDashboard:
                 )
                 safe_addstr(stdscr, curr_row, 2, t_line, color_yellow)
         else:
-            safe_addstr(stdscr, 13, 4, "(No trades executed yet)")
+            safe_addstr(stdscr, trade_tbl_hdr + 1, 4, "(No trades executed yet)")
 
         # ======================================================================
-        # SECTION D: PERFORMANCE & LATENCY METRICS
+        # SECTION E: PERFORMANCE & LATENCY METRICS
         # ======================================================================
-        safe_addstr(stdscr, 18, 0, "-" * (max_x - 1))
-        safe_addstr(stdscr, 19, 2, "PERFORMANCE & LATENCY METRICS", color_cyan | bold)
+        perf_div_row = max(18, max_y - 6)
+        safe_addstr(stdscr, perf_div_row, 0, "-" * (max_x - 1))
+        safe_addstr(stdscr, perf_div_row + 1, 2, "PERFORMANCE & LATENCY METRICS", color_cyan | bold)
 
-        # Row 20: Operational counters
+        # Row 1: Operational counters
         line_perf1 = (
             f"Orders Processed: {orders_count:,} | "
             f"Trades: {trades_count:,} | "
-            f"Current Throughput: {throughput:,.1f} orders/sec"
+            f"Sweeps Detected: {total_sweeps} | "
+            f"Throughput: {throughput:,.1f} orders/sec"
         )
-        safe_addstr(stdscr, 20, 2, line_perf1)
+        safe_addstr(stdscr, perf_div_row + 2, 2, line_perf1)
 
-        # Row 21: Matching Engine micro-latency (Mean, P95, P99)
+        # Row 2: Matching Engine micro-latency (Mean, P50, P90, P95, P99)
         line_perf2 = (
-            f"Engine Latency:  Mean: {m_mean:6.2f} us | "
-            f"P95: {m_p95:6.2f} us | "
-            f"P99: {m_p99:6.2f} us (Hot-path C/Cython match)"
+            f"Engine Latency:  Mean: {m_mean:5.2f} us | "
+            f"P50: {m_p50:5.2f} us | "
+            f"P95: {m_p95:5.2f} us | "
+            f"P99: {m_p99:5.2f} us (Hot-path C/Cython match)"
         )
-        safe_addstr(stdscr, 21, 2, line_perf2, color_green if m_mean < 20.0 else color_yellow)
+        safe_addstr(stdscr, perf_div_row + 3, 2, line_perf2, color_green if m_mean < 20.0 else color_yellow)
 
-        # Row 22: Pipeline End-to-End latency (Simulator -> IPC -> Consumer -> Book)
+        # Row 3: Pipeline End-to-End latency (Simulator -> IPC -> Consumer -> Book)
         line_perf3 = (
-            f"Pipeline E2E:    Mean: {e_mean:6.2f} us | "
-            f"P95: {e_p95:6.2f} us | "
-            f"P99: {e_p99:6.2f} us (Zero-loss IPC ring buffer)"
+            f"Pipeline E2E:    Mean: {e_mean:5.2f} us | "
+            f"P50: {e_p50:5.2f} us | "
+            f"P95: {e_p95:5.2f} us | "
+            f"P99: {e_p99:5.2f} us (Zero-loss IPC ring buffer)"
         )
-        safe_addstr(stdscr, 22, 2, line_perf3, color_cyan)
+        safe_addstr(stdscr, perf_div_row + 4, 2, line_perf3, color_cyan)
 
         # Footer
-        safe_addstr(stdscr, 23, 0, "=" * (max_x - 1))
+        safe_addstr(stdscr, perf_div_row + 5, 0, "=" * (max_x - 1))
 
         stdscr.refresh()
 

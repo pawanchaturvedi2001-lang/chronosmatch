@@ -510,6 +510,8 @@ class MarketEngineService:
                     "orders_processed": self.orders_processed,
                     "trades_executed": self.trades_executed,
                     "total_volume": self.total_volume,
+                    "total_sweeps_detected": getattr(self.lob, "total_sweeps_detected", 0),
+                    "last_sweep": getattr(self.lob, "last_sweep", None).to_dict() if getattr(self.lob, "last_sweep", None) else None,
                     "throughput_ops": self.current_throughput,
                     "latency": {
                         "match_mean_us": m_mean,

@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from ipc.structures import Order, Side, SIDE_BUY, SIDE_SELL
-from core.models import Trade, PriceLevel
+from core.models import Trade, PriceLevel, WhaleSweep
 
 # Attempt to import compiled Cython engine
 try:
@@ -65,6 +65,12 @@ class PyLimitOrderBook:
         # Trade history and execution metrics
         self._trade_counter = 0
         self._recent_trades: deque[Trade] = deque(maxlen=100)
+
+        # Whale order sweep tracking
+        self.whale_min_levels: int = 2
+        self._recent_sweeps: deque = deque(maxlen=50)
+        self.last_sweep: Optional[WhaleSweep] = None
+        self.total_sweeps_detected: int = 0
 
         # Operational metrics
         self.total_orders_processed = 0
@@ -182,6 +188,11 @@ class PyLimitOrderBook:
         """Returns the most recent executed trades up to limit."""
         trades = list(self._recent_trades)
         return trades[-limit:] if limit > 0 else trades
+
+    def get_recent_sweeps(self, limit: int = 10) -> List[WhaleSweep]:
+        """Returns the most recent whale sweeps up to limit."""
+        sweeps = list(self._recent_sweeps)
+        return sweeps[-limit:] if limit > 0 else sweeps
 
     def cancel_order(self, order_id: int) -> bool:
         """
@@ -366,6 +377,33 @@ class PyLimitOrderBook:
                 timestamp_ns=order.timestamp_ns,
             )
             self.add_resting_order(residual_order)
+
+        # Detect whale sweep: incoming order sweeping multiple distinct price levels
+        if len(trades) > 1:
+            distinct_prices = []
+            seen_prices = set()
+            for t in trades:
+                if t.price not in seen_prices:
+                    seen_prices.add(t.price)
+                    distinct_prices.append(t.price)
+
+            if len(distinct_prices) >= self.whale_min_levels:
+                side_str = "BUY" if order.side == Side.BUY else "SELL"
+                sweep = WhaleSweep(
+                    order_id=order.order_id,
+                    side=side_str,
+                    levels_swept=len(distinct_prices),
+                    total_quantity=sum(t.quantity for t in trades),
+                    start_price=distinct_prices[0],
+                    end_price=distinct_prices[-1],
+                    trades_count=len(trades),
+                    trades=list(trades),
+                    residual_quantity=remaining_qty,
+                    timestamp_ns=trades[0].timestamp_ns if trades else time.time_ns(),
+                )
+                self._recent_sweeps.append(sweep)
+                self.last_sweep = sweep
+                self.total_sweeps_detected += 1
 
         t1 = time.perf_counter_ns()
         latency = t1 - t0

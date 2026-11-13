@@ -26,6 +26,7 @@ from core.models import Trade
 from simulator.market_simulator import run_simulator, SimulatorStats
 from simulator.order_generator import OrderGeneratorConfig
 from monitoring.dashboard import OrderBookDashboard, HAVE_CURSES
+from monitoring.latency import PipelineLatencyMonitor
 
 
 class ChronosEngine:
@@ -53,9 +54,10 @@ class ChronosEngine:
         self.trades_generated = 0
         self.consumer_elapsed_sec = 0.0
 
-        # Latency samples (sliding window in microseconds)
-        self.match_latencies: deque = deque(maxlen=20000)
-        self.e2e_latencies: deque = deque(maxlen=20000)
+        # Latency monitoring (separate engine and end-to-end pipelines)
+        self.latency_monitor = PipelineLatencyMonitor(max_samples=20000)
+        self.match_latencies = self.latency_monitor.engine_tracker._samples
+        self.e2e_latencies = self.latency_monitor.e2e_tracker._samples
         self._last_throughput_calc = time.perf_counter()
         self._last_orders_count = 0
         self.current_throughput = 0.0
@@ -64,31 +66,24 @@ class ChronosEngine:
         """
         Calculates real-time engine and end-to-end performance percentiles.
         """
-        def _calc_percentiles(samples: deque):
-            if not samples:
-                return 0.0, 0.0, 0.0
-            s = sorted(samples)
-            n = len(s)
-            mean_v = sum(s) / n
-            p95_v = s[min(int(n * 0.95), n - 1)]
-            p99_v = s[min(int(n * 0.99), n - 1)]
-            return mean_v, p95_v, p99_v
-
-        m_mean, m_p95, m_p99 = _calc_percentiles(self.match_latencies)
-        e_mean, e_p95, e_p99 = _calc_percentiles(self.e2e_latencies)
-
         return {
-            "match_latency_mean_us": m_mean,
-            "match_latency_p95_us": m_p95,
-            "match_latency_p99_us": m_p99,
-            "e2e_latency_mean_us": e_mean,
-            "e2e_latency_p95_us": e_p95,
-            "e2e_latency_p99_us": e_p99,
+            "match_latency_mean_us": self.latency_monitor.engine_tracker.mean_us(),
+            "match_latency_p50_us": self.latency_monitor.engine_tracker.p50_us(),
+            "match_latency_p90_us": self.latency_monitor.engine_tracker.p90_us(),
+            "match_latency_p95_us": self.latency_monitor.engine_tracker.p95_us(),
+            "match_latency_p99_us": self.latency_monitor.engine_tracker.p99_us(),
+            "e2e_latency_mean_us": self.latency_monitor.e2e_tracker.mean_us(),
+            "e2e_latency_p50_us": self.latency_monitor.e2e_tracker.p50_us(),
+            "e2e_latency_p90_us": self.latency_monitor.e2e_tracker.p90_us(),
+            "e2e_latency_p95_us": self.latency_monitor.e2e_tracker.p95_us(),
+            "e2e_latency_p99_us": self.latency_monitor.e2e_tracker.p99_us(),
             "orders_consumed": self.orders_consumed,
             "trades_generated": self.trades_generated,
             "throughput_ops": self.current_throughput,
             "simulator_status": self.simulator_status,
             "engine_status": self.engine_status,
+            "total_sweeps_detected": getattr(self.lob, "total_sweeps_detected", 0),
+            "last_sweep": getattr(self.lob, "last_sweep", None),
         }
 
     async def run_consumer(self, stop_event: asyncio.Event) -> int:
@@ -239,6 +234,7 @@ class ChronosEngine:
             "e2e_latency_mean_us": perf_stats["e2e_latency_mean_us"],
             "e2e_latency_p95_us": perf_stats["e2e_latency_p95_us"],
             "e2e_latency_p99_us": perf_stats["e2e_latency_p99_us"],
+            "total_sweeps_detected": perf_stats["total_sweeps_detected"],
         }
 
 

@@ -19,7 +19,7 @@ import time
 from collections import deque
 
 from ipc.structures import Order, Side
-from core.models import Trade, PriceLevel
+from core.models import Trade, PriceLevel, WhaleSweep
 
 
 cdef inline int64_t c_price_to_ticks(double price, double inv_tick) nogil:
@@ -55,6 +55,11 @@ cdef class LimitOrderBook:
     cdef public uint64_t _trade_counter
     cdef object _recent_trades
 
+    cdef public int whale_min_levels
+    cdef object _recent_sweeps
+    cdef public object last_sweep
+    cdef public uint64_t total_sweeps_detected
+
     cdef public uint64_t total_orders_processed
     cdef public uint64_t total_trades_executed
     cdef public uint64_t total_volume_executed
@@ -74,6 +79,11 @@ cdef class LimitOrderBook:
 
         self._trade_counter = 0
         self._recent_trades = deque(maxlen=100)
+
+        self.whale_min_levels = 2
+        self._recent_sweeps = deque(maxlen=50)
+        self.last_sweep = None
+        self.total_sweeps_detected = 0
 
         self.total_orders_processed = 0
         self.total_trades_executed = 0
@@ -188,7 +198,18 @@ cdef class LimitOrderBook:
     cpdef list get_recent_trades(self, int limit=20):
         """Returns recent executed trades."""
         trades = list(self._recent_trades)
-        return trades[-limit:] if limit > 0 else trades
+        if limit <= 0:
+            return trades
+        cdef int start_idx = max(0, len(trades) - limit)
+        return trades[start_idx:]
+
+    cpdef list get_recent_sweeps(self, int limit=10):
+        """Returns recent whale sweep events."""
+        sweeps = list(self._recent_sweeps)
+        if limit <= 0:
+            return sweeps
+        cdef int start_idx = max(0, len(sweeps) - limit)
+        return sweeps[start_idx:]
 
     cpdef bint cancel_order(self, uint64_t order_id):
         """Cancel a resting order by order ID."""
@@ -371,6 +392,40 @@ cdef class LimitOrderBook:
                 timestamp_ns=order_ts,
             )
             self.add_resting_order(residual_order)
+
+        # Detect whale sweep: incoming order sweeping multiple distinct price levels
+        cdef list distinct_prices
+        cdef set seen_prices
+        cdef uint32_t swept_vol
+        cdef int n_levels
+        if len(trades) > 1:
+            distinct_prices = []
+            seen_prices = set()
+            swept_vol = 0
+            for trade in trades:
+                swept_vol += <uint32_t>trade.quantity
+                if trade.price not in seen_prices:
+                    seen_prices.add(trade.price)
+                    distinct_prices.append(trade.price)
+
+            n_levels = len(distinct_prices)
+            if n_levels >= self.whale_min_levels:
+                side_str = "BUY" if order_side == Side.BUY else "SELL"
+                sweep = WhaleSweep(
+                    order_id=order_id,
+                    side=side_str,
+                    levels_swept=n_levels,
+                    total_quantity=swept_vol,
+                    start_price=distinct_prices[0],
+                    end_price=distinct_prices[n_levels - 1],
+                    trades_count=len(trades),
+                    trades=list(trades),
+                    residual_quantity=remaining_qty,
+                    timestamp_ns=trades[0].timestamp_ns if trades else time.time_ns(),
+                )
+                self._recent_sweeps.append(sweep)
+                self.last_sweep = sweep
+                self.total_sweeps_detected += 1
 
         t1 = time.perf_counter_ns()
         latency = t1 - t0

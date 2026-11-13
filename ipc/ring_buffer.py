@@ -19,13 +19,25 @@ class BufferFullError(Exception):
 
 # Ring buffer header format:
 # '<QQII' (24 bytes):
-#   write_idx: uint64 (8 bytes)
-#   read_idx:  uint64 (8 bytes)
-#   capacity:  uint32 (4 bytes)
-#   slot_size: uint32 (4 bytes)
+#   write_idx: uint64 (8 bytes, offset 0)
+#   read_idx:  uint64 (8 bytes, offset 8)
+#   capacity:  uint32 (4 bytes, offset 16)
+#   slot_size: uint32 (4 bytes, offset 20)
 HEADER_FORMAT = "<QQII"
 HEADER_STRUCT = struct.Struct(HEADER_FORMAT)
 HEADER_SIZE = HEADER_STRUCT.size  # 24 bytes
+
+# Dedicated sub-structs for atomic independent index updates:
+# Producer updates ONLY write_idx (offset 0); Consumer updates ONLY read_idx (offset 8).
+# This prevents race conditions where unpacking and packing the full header rewrites stale indices.
+WRITE_IDX_STRUCT = struct.Struct("<Q")
+WRITE_IDX_OFFSET = 0
+
+READ_IDX_STRUCT = struct.Struct("<Q")
+READ_IDX_OFFSET = 8
+
+PARAMS_STRUCT = struct.Struct("<II")
+PARAMS_OFFSET = 16
 
 
 class RingBuffer:
@@ -66,7 +78,7 @@ class RingBuffer:
         self._mv = self._mmap_buf.buffer
 
         if create:
-            # Initialize header: write_idx=0, read_idx=0, capacity, slot_size
+            # Initialize complete header: write_idx=0, read_idx=0, capacity, slot_size
             HEADER_STRUCT.pack_into(self._mv, 0, 0, 0, self.capacity, self.slot_size)
         else:
             # Read header parameters
@@ -77,36 +89,25 @@ class RingBuffer:
     @property
     def write_idx(self) -> int:
         """Current monotonic write index."""
-        return HEADER_STRUCT.unpack_from(self._mv, 0)[0]
+        return WRITE_IDX_STRUCT.unpack_from(self._mv, WRITE_IDX_OFFSET)[0]
 
     @write_idx.setter
     def write_idx(self, value: int):
-        HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            value,
-            self.read_idx,
-            self.capacity,
-            self.slot_size,
-        )
+        WRITE_IDX_STRUCT.pack_into(self._mv, WRITE_IDX_OFFSET, value)
 
     @property
     def read_idx(self) -> int:
         """Current monotonic read index."""
-        return HEADER_STRUCT.unpack_from(self._mv, 0)[1]
+        return READ_IDX_STRUCT.unpack_from(self._mv, READ_IDX_OFFSET)[0]
 
     @read_idx.setter
     def read_idx(self, value: int):
-        HEADER_STRUCT.pack_into(
-            self._mv, 0,
-            self.write_idx,
-            value,
-            self.capacity,
-            self.slot_size,
-        )
+        READ_IDX_STRUCT.pack_into(self._mv, READ_IDX_OFFSET, value)
 
     def size(self) -> int:
         """Returns the number of unconsumed items currently in the buffer."""
-        w, r, _, _ = HEADER_STRUCT.unpack_from(self._mv, 0)
+        w = WRITE_IDX_STRUCT.unpack_from(self._mv, WRITE_IDX_OFFSET)[0]
+        r = READ_IDX_STRUCT.unpack_from(self._mv, READ_IDX_OFFSET)[0]
         return w - r
 
     def is_full(self) -> bool:
@@ -129,48 +130,67 @@ class RingBuffer:
         """
         Write binary data into the next free slot in the ring buffer.
 
+        Single-Producer Single-Consumer (SPSC) safe:
+        - Reads read_idx to verify available capacity.
+        - Copies payload into slot BEFORE advancing write_idx.
+        - Updates ONLY write_idx at offset 0 (never touches read_idx at offset 8).
+
         Args:
             data: Binary payload of length <= slot_size.
 
         Returns:
             True if written successfully, False if buffer is full.
         """
-        w, r, cap, slot_sz = HEADER_STRUCT.unpack_from(self._mv, 0)
+        w = WRITE_IDX_STRUCT.unpack_from(self._mv, WRITE_IDX_OFFSET)[0]
+        r = READ_IDX_STRUCT.unpack_from(self._mv, READ_IDX_OFFSET)[0]
+        cap = self.capacity
+        slot_sz = self.slot_size
+
         if w - r >= cap:
             return False  # Buffer full
 
-        slot_offset = HEADER_SIZE + ((w % cap) * slot_sz)
         data_len = len(data)
         if data_len > slot_sz:
             raise ValueError(f"Data size {data_len} exceeds slot size {slot_sz}")
 
+        slot_offset = HEADER_SIZE + ((w % cap) * slot_sz)
         self._mv[slot_offset : slot_offset + data_len] = data
 
-        # Advance write index
-        HEADER_STRUCT.pack_into(self._mv, 0, w + 1, r, cap, slot_sz)
+        # Advance ONLY write index at offset 0
+        WRITE_IDX_STRUCT.pack_into(self._mv, WRITE_IDX_OFFSET, w + 1)
         return True
 
     def read(self) -> Optional[bytes]:
         """
         Read the next binary item from the ring buffer.
 
+        Single-Producer Single-Consumer (SPSC) safe:
+        - Reads write_idx to verify available items.
+        - Copies payload out of slot BEFORE advancing read_idx.
+        - Updates ONLY read_idx at offset 8 (never touches write_idx at offset 0).
+
         Returns:
             bytes containing the slot payload, or None if the buffer is empty.
         """
-        w, r, cap, slot_sz = HEADER_STRUCT.unpack_from(self._mv, 0)
+        r = READ_IDX_STRUCT.unpack_from(self._mv, READ_IDX_OFFSET)[0]
+        w = WRITE_IDX_STRUCT.unpack_from(self._mv, WRITE_IDX_OFFSET)[0]
+        cap = self.capacity
+        slot_sz = self.slot_size
+
         if r >= w:
             return None  # Buffer empty
 
         slot_offset = HEADER_SIZE + ((r % cap) * slot_sz)
         data = bytes(self._mv[slot_offset : slot_offset + slot_sz])
 
-        # Advance read index
-        HEADER_STRUCT.pack_into(self._mv, 0, w, r + 1, cap, slot_sz)
+        # Advance ONLY read index at offset 8
+        READ_IDX_STRUCT.pack_into(self._mv, READ_IDX_OFFSET, r + 1)
         return data
 
     def reset(self):
         """Reset write and read indices to 0."""
-        HEADER_STRUCT.pack_into(self._mv, 0, 0, 0, self.capacity, self.slot_size)
+        WRITE_IDX_STRUCT.pack_into(self._mv, WRITE_IDX_OFFSET, 0)
+        READ_IDX_STRUCT.pack_into(self._mv, READ_IDX_OFFSET, 0)
 
     def close(self):
         """Release underlying mmap buffer."""

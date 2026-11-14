@@ -1,16 +1,43 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions & compiled binaries
 *.so
 *.pyd
+*.c
 *.bin
 *.mmap
-.coverage
-htmlcov/
-.pytest_cache/
+core/cython_engine/*.html
+
+# Distribution / packaging
 build/
 dist/
 *.egg-info/
-*.c
-core/cython_engine/*.html
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases and logs
 db.sqlite3
+*.log
+
+# Environment and secrets
+.env
+.venv/
+env/
+venv/
+
+# Scratch & temporary development files
+scratch/
+*.tmp
+*.swp
+
+# OS / Editor artifacts
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

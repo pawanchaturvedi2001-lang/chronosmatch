@@ -248,6 +248,57 @@ class TestDjangoTradingTerminal(TestCase):
         self.assertIn("e2e_mean_us", data["latency"])
         self.assertIn("engine_mode", data)
 
+    def test_api_sweeps(self):
+        """Verify GET /api/sweeps/ returns total sweeps, last sweep, and recent sweeps list."""
+        response = self.client.get("/api/sweeps/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("total_sweeps_detected", data)
+        self.assertIn("last_sweep", data)
+        self.assertIn("recent_sweeps", data)
+        self.assertEqual(data["symbol"], "CHRONOS/USD")
+
+    def test_order_submission_status_distinctions(self):
+        """Verify order submitted, order accepted, fully executed, partially filled, and rejected states."""
+        # 1. Validation failure: rejected
+        res_rej = self.client.post("/api/orders/", data=json.dumps({"side": "INVALID", "price": 100, "quantity": 10}), content_type="application/json")
+        self.assertEqual(res_rej.status_code, 400)
+        d_rej = res_rej.json()
+        self.assertTrue(d_rej["order_submitted"])
+        self.assertFalse(d_rej["order_accepted"])
+        self.assertEqual(d_rej["status"], "REJECTED")
+
+        # 2. Resting order: submitted, accepted, resting
+        res_rest = self.client.post("/api/orders/", data=json.dumps({"side": "SELL", "price": 105.0, "quantity": 100}), content_type="application/json")
+        self.assertEqual(res_rest.status_code, 200)
+        d_rest = res_rest.json()
+        self.assertTrue(d_rest["order_submitted"])
+        self.assertTrue(d_rest["order_accepted"])
+        self.assertEqual(d_rest["status"], "RESTING")
+        self.assertEqual(d_rest["execution_status"], "ACCEPTED_RESTING")
+
+        # 3. Partial fill of incoming order: resting SELL has 100 shares. Incoming BUY has 150 shares @ 105.0.
+        # Fills 100 shares, 50 shares remain resting in book!
+        res_part = self.client.post("/api/orders/", data=json.dumps({"side": "BUY", "price": 105.0, "quantity": 150}), content_type="application/json")
+        self.assertEqual(res_part.status_code, 200)
+        d_part = res_part.json()
+        self.assertTrue(d_part["order_submitted"])
+        self.assertTrue(d_part["order_accepted"])
+        self.assertEqual(d_part["status"], "PARTIALLY_FILLED")
+        self.assertEqual(d_part["execution_status"], "PARTIALLY_FILLED")
+        self.assertEqual(d_part["filled_quantity"], 100)
+        self.assertEqual(d_part["remaining_quantity"], 50)
+
+        # 4. Full fill of remaining resting BUY order (50 shares @ 105.0) with incoming SELL of 50 shares @ 105.0
+        res_full = self.client.post("/api/orders/", data=json.dumps({"side": "SELL", "price": 105.0, "quantity": 50}), content_type="application/json")
+        self.assertEqual(res_full.status_code, 200)
+        d_full = res_full.json()
+        self.assertTrue(d_full["order_submitted"])
+        self.assertTrue(d_full["order_accepted"])
+        self.assertEqual(d_full["status"], "FILLED")
+        self.assertEqual(d_full["execution_status"], "FULLY_EXECUTED")
+        self.assertEqual(d_full["filled_quantity"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

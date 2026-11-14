@@ -102,6 +102,23 @@ def metrics_api(request: HttpRequest) -> JsonResponse:
 
 
 @require_GET
+def sweeps_api(request: HttpRequest) -> JsonResponse:
+    """
+    GET /api/sweeps/
+    Whale sweep detection events and history.
+    """
+    limit = request.GET.get("limit", 20)
+    try:
+        limit = max(1, min(100, int(limit)))
+    except (ValueError, TypeError):
+        limit = 20
+
+    service = get_engine_service()
+    data = service.get_sweeps_data(limit=limit)
+    return JsonResponse(data)
+
+
+@require_GET
 def market_data_feed(request: HttpRequest) -> JsonResponse:
     """
     GET /api/market-data/

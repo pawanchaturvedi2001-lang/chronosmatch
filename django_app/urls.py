@@ -12,10 +12,10 @@ urlpatterns = [
     path("api/orderbook/", views.orderbook_api, name="api_orderbook"),
     path("api/trades/", views.trades_api, name="api_trades"),
     path("api/metrics/", views.metrics_api, name="api_metrics"),
+    path("api/sweeps/", views.sweeps_api, name="api_sweeps"),
     path("api/market-data/", views.market_data_feed, name="api_market_data"),
     path("api/orders/", views.submit_order_api, name="api_submit_order"),
     path("api/simulator/start/", views.start_simulator_api, name="api_simulator_start"),
     path("api/simulator/stop/", views.stop_simulator_api, name="api_simulator_stop"),
     path("api/simulator/reset/", views.reset_book_api, name="api_simulator_reset"),
 ]
-

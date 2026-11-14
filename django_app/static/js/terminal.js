@@ -12,6 +12,7 @@ const API_ENDPOINTS = {
   ORDERBOOK: '/api/orderbook/',
   TRADES: '/api/trades/',
   METRICS: '/api/metrics/',
+  SWEEPS: '/api/sweeps/',
   MARKET_DATA: '/api/market-data/',
   SUBMIT_ORDER: '/api/orders/',
   SIMULATOR_START: '/api/simulator/start/',
@@ -27,6 +28,7 @@ let chartMode = 'price'; // 'price' or 'latency'
 let lastPrice = null;
 let lastBestBid = null;
 let lastBestAsk = null;
+let lastSweepsCount = 0;
 
 // Initialize on DOM load
 document.addEventListener('DOMContentLoaded', () => {
@@ -545,6 +547,32 @@ function updateUI(data) {
       lobDetail.innerText = `Price-Time FIFO &bull; ${sh.order_book.levels || 0} active levels`;
     }
   }
+
+  // Whale Sweeps Alert Update
+  const totalSweeps = metrics.total_sweeps_detected || 0;
+  const sweepBadge = document.getElementById('sweep-total-badge');
+  if (sweepBadge) {
+    sweepBadge.innerText = `${totalSweeps.toLocaleString()} Sweeps Detected`;
+  }
+  const sweepBox = document.getElementById('whale-sweep-alert-box');
+  if (sweepBox && metrics.last_sweep) {
+    const sw = metrics.last_sweep;
+    sweepBox.style.background = 'rgba(245, 158, 11, 0.08)';
+    sweepBox.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+    sweepBox.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+        <span style="font-weight: 700; color: #f59e0b;">ALERT: WHALE SWEEP #${sw.order_id} (${sw.side})</span>
+        <span style="color: var(--text-dim); font-size: 10px;">${new Date().toLocaleTimeString()}</span>
+      </div>
+      <div style="color: #fff;">
+        Incoming aggressive <strong>${sw.side}</strong> swept <strong style="color: #38bdf8;">${sw.levels_swept} price levels</strong> (${sw.total_quantity.toLocaleString()} shares) from <strong>$${sw.start_price.toFixed(2)}</strong> to <strong>$${sw.end_price.toFixed(2)}</strong> across ${sw.trades_count} executions.
+      </div>
+    `;
+    if (totalSweeps > lastSweepsCount && lastSweepsCount > 0) {
+      showToast(`Whale Sweep Alert: Order #${sw.order_id} swept ${sw.levels_swept} levels!`, 'warn');
+    }
+  }
+  lastSweepsCount = totalSweeps;
 
   // Footer Uptime
   const uptimeElem = document.getElementById('footer-uptime');

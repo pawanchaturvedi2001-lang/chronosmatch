@@ -80,22 +80,52 @@ class MarketEngineService:
         """
         side_clean = str(side_str).strip().upper()
         if side_clean not in ("BUY", "SELL"):
-            return {"success": False, "error": f"Invalid order side '{side_str}'. Must be BUY or SELL."}
+            return {
+                "success": False,
+                "order_submitted": True,
+                "order_accepted": False,
+                "status": "REJECTED",
+                "error": f"Invalid order side '{side_str}'. Must be BUY or SELL."
+            }
 
         try:
             px = float(price)
             if px <= 0.0:
-                return {"success": False, "error": "Price must be strictly positive."}
+                return {
+                    "success": False,
+                    "order_submitted": True,
+                    "order_accepted": False,
+                    "status": "REJECTED",
+                    "error": "Price must be strictly positive."
+                }
             px = round(px, 2)
         except (ValueError, TypeError):
-            return {"success": False, "error": "Price must be a valid decimal number."}
+            return {
+                "success": False,
+                "order_submitted": True,
+                "order_accepted": False,
+                "status": "REJECTED",
+                "error": "Price must be a valid decimal number."
+            }
 
         try:
             qty = int(quantity)
             if qty <= 0:
-                return {"success": False, "error": "Quantity must be a positive integer."}
+                return {
+                    "success": False,
+                    "order_submitted": True,
+                    "order_accepted": False,
+                    "status": "REJECTED",
+                    "error": "Quantity must be a positive integer."
+                }
         except (ValueError, TypeError):
-            return {"success": False, "error": "Quantity must be an integer."}
+            return {
+                "success": False,
+                "order_submitted": True,
+                "order_accepted": False,
+                "status": "REJECTED",
+                "error": "Quantity must be an integer."
+            }
 
         with self._lock:
             self._manual_order_counter += 1
@@ -134,18 +164,24 @@ class MarketEngineService:
 
             if filled_qty == qty:
                 status = "FILLED"
+                exec_status = "FULLY_EXECUTED"
             elif filled_qty > 0:
                 status = "PARTIALLY_FILLED"
+                exec_status = "PARTIALLY_FILLED"
             else:
                 status = "RESTING"
+                exec_status = "ACCEPTED_RESTING"
 
             return {
                 "success": True,
+                "order_submitted": True,
+                "order_accepted": True,
                 "order_id": order_id,
                 "side": side_clean,
                 "price": px,
                 "quantity": qty,
                 "status": status,
+                "execution_status": exec_status,
                 "filled_quantity": filled_qty,
                 "remaining_quantity": qty - filled_qty,
                 "trades_count": len(trades),
@@ -385,6 +421,20 @@ class MarketEngineService:
                 "trades": trades_list,
                 "total_trades": self.trades_executed,
                 "total_volume": self.total_volume,
+                "timestamp": time.time(),
+            }
+
+    def get_sweeps_data(self, limit: int = 20) -> Dict[str, Any]:
+        """Returns recent whale sweeps for GET /api/sweeps/."""
+        with self._lock:
+            sweeps_raw = self.lob.get_recent_sweeps(limit=limit) if hasattr(self.lob, "get_recent_sweeps") else []
+            sweeps_list = [s.to_dict() if hasattr(s, "to_dict") else dict(s) for s in sweeps_raw]
+            last_sweep_dict = self.lob.last_sweep.to_dict() if getattr(self.lob, "last_sweep", None) else None
+            return {
+                "symbol": "CHRONOS/USD",
+                "total_sweeps_detected": getattr(self.lob, "total_sweeps_detected", 0),
+                "last_sweep": last_sweep_dict,
+                "recent_sweeps": sweeps_list,
                 "timestamp": time.time(),
             }
 

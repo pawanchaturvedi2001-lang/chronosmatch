@@ -5,7 +5,7 @@ from Cython.Build import cythonize
 extensions = [
     Extension(
         name="matching_engine",
-        sources=["matching_engine.pyx"],
+        sources=["matching.pyx"],
     )
 ]
 

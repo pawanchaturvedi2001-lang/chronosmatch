@@ -3,7 +3,7 @@
 # Cython-based matching quantity helper
 
 cpdef int match_quantity(int buy_quantity, int sell_quantity):
-    """Return the quantity that can be matched."""
+    """Return the matchable quantity, or zero for nonpositive inputs."""
     if buy_quantity <= 0 or sell_quantity <= 0:
         return 0
 
